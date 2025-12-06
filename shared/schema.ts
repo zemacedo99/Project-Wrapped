@@ -96,3 +96,14 @@ export type Top5 = z.infer<typeof top5Schema>;
 export type Milestone = z.infer<typeof milestoneSchema>;
 export type ProjectStats = z.infer<typeof projectStatsSchema>;
 export type ProjectWrappedData = z.infer<typeof projectWrappedDataSchema>;
+
+export const savedWrapped = pgTable("saved_wrapped", {
+  id: varchar("id", { length: 16 }).primaryKey(),
+  projectName: text("project_name").notNull(),
+  data: jsonb("data").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertSavedWrappedSchema = createInsertSchema(savedWrapped).omit({ createdAt: true });
+export type InsertSavedWrapped = z.infer<typeof insertSavedWrappedSchema>;
+export type SavedWrapped = typeof savedWrapped.$inferSelect;
