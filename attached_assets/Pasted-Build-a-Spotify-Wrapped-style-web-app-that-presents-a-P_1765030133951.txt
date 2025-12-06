@@ -1,0 +1,210 @@
+Build a “Spotify Wrapped” style web app that presents a Project Wrapped for:
+
+Project: DVOI – DaVinci On Iris  
+Context: We are finishing version 1.0 and want a fun, visual summary of the work.
+
+Requirements:
+
+1. General
+- Single page web app using HTML, CSS and vanilla JavaScript (no frameworks).
+- Responsive for desktop and mobile.
+- Visual vibe similar to Spotify Wrapped: bold typography, gradients, cards, smooth animations.
+- Dark background with vibrant accent colors.
+
+2. Data (placeholders only, ready to be replaced later)
+For now use only placeholder data.  
+Later this will be replaced by Azure DevOps or Git integration, or manual JSON input.
+
+Include:
+- Project name
+- Date range (project longer than one year)
+- Version info (for example: 1.0)
+
+Example placeholder structure:
+
+const projectWrappedData = {
+  projectName: "DVOI – DaVinci On Iris",
+  version: "1.0",
+  dateRange: {
+    start: "2023-01-01",   // placeholder
+    end: "2025-12-31"      // placeholder
+  },
+
+  stats: {
+    totalCommits: 0,
+    totalPullRequests: 0,
+    totalReviews: 0,
+    totalComments: 0,
+    totalBugsFixed: 0,
+    totalStoryPointsDone: 0,
+    sprintsCompleted: 0
+  },
+
+  contributors: [
+    {
+      name: "Contributor 1",
+      commits: 0,
+      pullRequestsOpened: 0,
+      pullRequestsReviewed: 0,
+      commentsWritten: 0,
+      bugsFixed: 0,
+      storyPointsDone: 0
+    },
+    {
+      name: "Contributor 2",
+      commits: 0,
+      pullRequestsOpened: 0,
+      pullRequestsReviewed: 0,
+      commentsWritten: 0,
+      bugsFixed: 0,
+      storyPointsDone: 0
+    }
+  ],
+
+  // Can be modules, areas, or components
+  modules: [
+    {
+      name: "Module A",
+      commits: 0,
+      pullRequests: 0,
+      storyPointsDone: 0,
+      status: "Unknown"
+    }
+  ],
+
+  // Top 5 lists of interesting data (all placeholder)
+  top5: {
+    mostCommits: [
+      { name: "Dev A", commits: 0 },
+      { name: "Dev B", commits: 0 }
+    ],
+    mostPullRequestsOpened: [
+      { name: "Dev C", pullRequestsOpened: 0 }
+    ],
+    mostPullRequestsReviewed: [
+      { name: "Dev D", pullRequestsReviewed: 0 }
+    ],
+    mostCommentsWritten: [
+      { name: "Dev E", commentsWritten: 0 }
+    ],
+    busiestDaysByCommits: [
+      { date: "2025-01-01", commits: 0 }
+    ]
+  },
+
+  highlights: [
+    "Placeholder highlight 1",
+    "Placeholder highlight 2"
+  ]
+};
+
+Create a loadData() function that currently just returns projectWrappedData but is clearly the place to plug:
+- Azure DevOps or Git APIs
+- Manual JSON
+- Any future backend
+
+3. App structure (slides like Spotify Wrapped)
+
+Design the UI as a sequence of slides or sections.
+
+1) Intro slide
+- Title: "Project Wrapped"
+- Subtitle: "DVOI – DaVinci On Iris 1.0"
+- Show date range: "From START to END"
+- Short text: "A look back at what it took to ship 1.0"
+
+2) Global statistics slide
+- Big number cards for:
+  - Total commits
+  - Total pull requests
+  - Total reviews
+  - Total comments
+  - Sprints completed
+  - Story points done
+- Numbers should animate counting up.
+
+3) Champions slide
+- Pull Request Reviewer Champion
+  - Highlight the contributor with the most pullRequestsReviewed.
+  - Big hero card with their name and stats.
+- Comments Champion
+  - Highlight the contributor with the most commentsWritten.
+  - Separate card calling them "Comments Champion".
+- Optionally show "Commit Champion" or "Bug Slayer" based on commits and bugsFixed.
+
+4) Top 5 slide
+- Use the top5 placeholder data to show:
+  - Top 5 by commits
+  - Top 5 by pull requests opened
+  - Top 5 by reviews
+  - Top 5 by comments
+- Display in a fun ranking layout (1 to 5) with small badges like "Commit machine", "Review beast".
+
+5) Modules slide
+- Cards for each module with:
+  - Name
+  - Commits
+  - Pull requests
+  - Story points done
+  - Status
+- Highlight the module with the most activity as "Most active module".
+
+6) Timeline slide
+- Show the journey to 1.0 using the date range and sprintsCompleted.
+- Simple timeline with placeholder milestones like:
+  - Project kick off
+  - First prototype
+  - First release candidate
+  - Big refactor phase
+  - 1.0 freeze
+  - 1.0 release
+- All milestone text can be placeholder text, but structured in the code.
+
+7) Highlights slide
+- Show the highlights array as "Achievements unlocked".
+- Each highlight with emojis or icons (for example: rocket, bug, fire).
+
+8) Outro slide
+- Message like:
+  - "That was DVOI 1.0."
+  - "Thanks for all the commits, reviews and comments."
+- Placeholder button: "Share this (coming soon)".
+
+4. Visual and UX details
+- Smooth scrolling or slide style navigation between sections.
+- Use CSS animations:
+  - Fade in and slide in for cards.
+  - Count up animation for numbers.
+- Fun, slightly playful tone. Use emojis and badges for champions and top 5s.
+- Keep layout clean and readable.
+
+5. Code structure
+- Use three files:
+  - index.html
+  - styles.css
+  - script.js
+- In script.js:
+  - Put projectWrappedData placeholder object in one place.
+  - Implement loadData() that returns the placeholder.
+  - Helper functions:
+    - renderIntro()
+    - renderGlobalStats()
+    - renderChampions()
+    - renderTop5()
+    - renderModules()
+    - renderTimeline()
+    - renderHighlights()
+    - renderOutro()
+    - helper for animated counters
+
+6. Comments
+Add short clear comments explaining:
+- Where to edit the placeholder data.
+- Where to integrate Azure DevOps or Git APIs.
+- Which functions to change when wiring real data.
+
+Please output a complete working project with:
+- index.html
+- styles.css
+- script.js
+that I can run directly in the browser.
