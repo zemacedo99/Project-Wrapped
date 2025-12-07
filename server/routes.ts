@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { projectWrappedDataSchema } from "@shared/schema";
-import { fetchAzureDevOpsData, validateAzureDevOpsConfig } from "./services/azure-devops";
+import { fetchAzureDevOpsData, validateAzureDevOpsConfig, testAzureDevOpsConnection } from "./services/azure-devops";
 import { fetchGitHubData, validateGitHubConfig } from "./services/github";
 import multer from "multer";
 
@@ -111,6 +111,36 @@ export async function registerRoutes(
       console.error("Error connecting to Azure DevOps:", error);
       res.status(500).json({ 
         error: error instanceof Error ? error.message : "Failed to connect to Azure DevOps" 
+      });
+    }
+  });
+
+  app.post("/api/test/azure-devops", async (req, res) => {
+    try {
+      const { organization, project, personalAccessToken } = req.body;
+
+      const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
+      if (validationErrors.length > 0) {
+        res.status(400).json({ error: validationErrors.join(", ") });
+        return;
+      }
+
+      const result = await testAzureDevOpsConnection({
+        organization,
+        project,
+        personalAccessToken,
+      });
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error("Error testing Azure DevOps connection:", error);
+      res.status(500).json({ 
+        success: false,
+        error: error instanceof Error ? error.message : "Connection test failed" 
       });
     }
   });

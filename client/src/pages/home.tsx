@@ -29,6 +29,9 @@ export default function Home() {
     dateTo: "",
   });
 
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
   const [githubForm, setGithubForm] = useState({
     owner: "",
     repo: "",
@@ -156,6 +159,49 @@ export default function Home() {
   const handleAzureSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     azureMutation.mutate(azureForm);
+  };
+
+  const handleTestAzureConnection = async () => {
+    setIsTestingConnection(true);
+    setConnectionTestResult(null);
+    
+    try {
+      const response = await fetch("/api/test/azure-devops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organization: azureForm.organization,
+          project: azureForm.project,
+          personalAccessToken: azureForm.personalAccessToken,
+        }),
+      });
+      
+      const result = await response.json();
+      setConnectionTestResult(result);
+      
+      if (result.success) {
+        toast({
+          title: "Connection successful!",
+          description: result.message,
+        });
+      } else {
+        toast({
+          title: "Connection failed",
+          description: result.message || result.error,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Connection test failed";
+      setConnectionTestResult({ success: false, message: errorMessage });
+      toast({
+        title: "Connection test failed",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingConnection(false);
+    }
   };
 
   const handleGitHubSubmit = (e: React.FormEvent) => {
@@ -388,7 +434,7 @@ export default function Home() {
               Connect to Azure DevOps
             </DialogTitle>
             <DialogDescription>
-              Enter your Azure DevOps organization details and a Personal Access Token with read access.
+              Enter your Azure DevOps organization details and a Personal Access Token with Code (Read) and Work Items (Read) permissions.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAzureSubmit} className="space-y-4">
@@ -398,10 +444,16 @@ export default function Home() {
                 id="azure-org"
                 placeholder="your-organization"
                 value={azureForm.organization}
-                onChange={(e) => setAzureForm({ ...azureForm, organization: e.target.value })}
+                onChange={(e) => {
+                  setAzureForm({ ...azureForm, organization: e.target.value });
+                  setConnectionTestResult(null);
+                }}
                 required
                 data-testid="input-azure-org"
               />
+              <p className="text-xs text-muted-foreground">
+                From: https://dev.azure.com/<strong>your-organization</strong>
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="azure-project">Project Name</Label>
@@ -409,7 +461,10 @@ export default function Home() {
                 id="azure-project"
                 placeholder="your-project"
                 value={azureForm.project}
-                onChange={(e) => setAzureForm({ ...azureForm, project: e.target.value })}
+                onChange={(e) => {
+                  setAzureForm({ ...azureForm, project: e.target.value });
+                  setConnectionTestResult(null);
+                }}
                 required
                 data-testid="input-azure-project"
               />
@@ -421,11 +476,62 @@ export default function Home() {
                 type="password"
                 placeholder="Enter your PAT"
                 value={azureForm.personalAccessToken}
-                onChange={(e) => setAzureForm({ ...azureForm, personalAccessToken: e.target.value })}
+                onChange={(e) => {
+                  setAzureForm({ ...azureForm, personalAccessToken: e.target.value });
+                  setConnectionTestResult(null);
+                }}
                 required
                 data-testid="input-azure-pat"
               />
+              <p className="text-xs text-muted-foreground">
+                Required scopes: Code (Read), Work Items (Read)
+              </p>
             </div>
+            
+            {connectionTestResult && (
+              <div className={`p-3 rounded-md border ${
+                connectionTestResult.success 
+                  ? 'bg-green-50 border-green-200 text-green-800' 
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}>
+                <div className="flex items-start gap-2">
+                  {connectionTestResult.success ? (
+                    <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  ) : (
+                    <X className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  )}
+                  <div className="flex-1">
+                    <p className="text-sm font-medium">{connectionTestResult.message}</p>
+                    {connectionTestResult.details && (
+                      <p className="text-xs mt-1">
+                        Found {connectionTestResult.details.repositoryCount} repositories
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            <Button 
+              type="button" 
+              variant="outline" 
+              className="w-full"
+              onClick={handleTestAzureConnection}
+              disabled={isTestingConnection || !azureForm.organization || !azureForm.project || !azureForm.personalAccessToken}
+            >
+              {isTestingConnection ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Testing Connection...
+                </>
+              ) : (
+                <>
+                  <Database className="w-4 h-4 mr-2" />
+                  Test Connection
+                </>
+              )}
+            </Button>
+            
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="azure-from">Date From (optional)</Label>
@@ -449,17 +555,27 @@ export default function Home() {
               </div>
             </div>
             <div className="flex justify-end gap-2 pt-4">
-              <Button type="button" variant="outline" onClick={() => setShowAzureDialog(false)}>
+              <Button type="button" variant="outline" onClick={() => {
+                setShowAzureDialog(false);
+                setConnectionTestResult(null);
+              }}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={azureMutation.isPending} data-testid="button-azure-connect">
+              <Button 
+                type="submit" 
+                disabled={azureMutation.isPending || !connectionTestResult?.success} 
+                data-testid="button-azure-connect"
+              >
                 {azureMutation.isPending ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Connecting...
+                    Fetching Data...
                   </>
                 ) : (
-                  "Connect"
+                  <>
+                    <ArrowRight className="w-4 h-4 mr-2" />
+                    Generate Wrapped
+                  </>
                 )}
               </Button>
             </div>
