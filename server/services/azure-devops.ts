@@ -1,3 +1,4 @@
+import https from "https";
 import type { ProjectWrappedData, Contributor, Module, Milestone, Top5 } from "@shared/schema";
 
 interface AzureDevOpsConfig {
@@ -53,25 +54,51 @@ interface AzureDevOpsWorkItem {
 async function fetchAzureDevOps<T>(
   config: AzureDevOpsConfig,
   apiPath: string,
-  apiVersion: string = "7.0"
+  apiVersion: string = "7.0",
+  method: string = "GET",
+  body?: string
 ): Promise<T> {
   // Support both cloud (dev.azure.com) and on-premises Azure DevOps Server
   // For on-premises: baseUrl is server URL, organization is collection name
   // For cloud: organization is the Azure DevOps organization name
+  
+  // For on-premises, we may need to handle URL encoding of collection names with spaces
+  // Try both encoded and decoded versions if needed
+  const encodedOrg = encodeURIComponent(config.organization);
+  const encodedProject = encodeURIComponent(config.project);
+  
   const baseUrl = config.baseUrl 
-    ? `${config.baseUrl}/${config.organization}/${config.project}/_apis`
-    : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
+    ? `${config.baseUrl}/${encodedOrg}/${encodedProject}/_apis`
+    : `https://dev.azure.com/${encodedOrg}/${encodedProject}/_apis`;
   const url = `${baseUrl}${apiPath}${apiPath.includes("?") ? "&" : "?"}api-version=${apiVersion}`;
 
-  console.log(`[Azure DevOps] Fetching URL: ${url}`);
-  console.log(`[Azure DevOps] Config - Base URL: ${config.baseUrl || 'cloud'}, Org/Collection: ${config.organization}, Project: ${config.project}`);
+  console.log(`[Azure DevOps] API Request:`);
+  console.log(`  Method: ${method}`);
+  console.log(`  Base URL: ${config.baseUrl || 'Azure DevOps cloud'}`);
+  console.log(`  Collection/Org: ${config.organization}`);
+  console.log(`  Project: ${config.project}`);
+  console.log(`  API Path: ${apiPath}`);
+  console.log(`  Full URL: ${url}`);
 
-  const response = await fetch(url, {
+  // For on-premises Azure DevOps Server with self-signed certificates
+  if (config.baseUrl && url.startsWith("https://")) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+    console.log(`[Azure DevOps] SSL verification disabled for self-signed certificate`);
+  }
+
+  const fetchOptions: RequestInit = {
+    method,
     headers: {
       Authorization: `Basic ${Buffer.from(`:${config.personalAccessToken}`).toString("base64")}`,
       "Content-Type": "application/json",
     },
-  });
+  };
+
+  if (body) {
+    fetchOptions.body = body;
+  }
+
+  const response = await fetch(url, fetchOptions);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -80,7 +107,7 @@ async function fetchAzureDevOps<T>(
     if (response.status === 401) {
       throw new Error("Authentication failed. Please check your Personal Access Token has the correct permissions (Code: Read, Work Items: Read).");
     } else if (response.status === 404) {
-      throw new Error(`Resource not found. Please verify your organization '${config.organization}' and project '${config.project}' names are correct.`);
+      throw new Error(`Resource not found at: ${url}\n\nPlease verify:\n1. Base URL is correct: ${config.baseUrl || "https://dev.azure.com"}\n2. Organization/Collection name: ${config.organization}\n3. Project name: ${config.project}`);
     } else if (response.status === 403) {
       throw new Error("Access denied. Your PAT may not have sufficient permissions. Required: Code (Read), Work Items (Read).");
     }
@@ -92,34 +119,40 @@ async function fetchAzureDevOps<T>(
 }
 
 export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<ProjectWrappedData> {
-  const dateFrom = config.dateFrom || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-  const dateTo = config.dateTo || new Date().toISOString().split("T")[0];
+  const dateFrom = config.dateFrom;
+  const dateTo = config.dateTo;
 
   console.log(`[Azure DevOps] Fetching data for ${config.organization}/${config.project}`);
-  console.log(`[Azure DevOps] Date range: ${dateFrom} to ${dateTo}`);
+  if (dateFrom && dateTo) {
+    console.log(`[Azure DevOps] Date range: ${dateFrom} to ${dateTo}`);
+  } else {
+    console.log(`[Azure DevOps] Fetching all commits (no date filter)`);
+  }
 
-  const [commits, pullRequests, workItems] = await Promise.all([
+  const [commits, pullRequests, workItems, prComments, commits_with_files] = await Promise.all([
     fetchCommits(config, dateFrom, dateTo),
     fetchPullRequests(config),
     fetchWorkItems(config, dateFrom, dateTo),
+    fetchPullRequestComments(config),
+    fetchCommitChanges(config, dateFrom, dateTo),
   ]);
 
-  console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items`);
+  console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items, ${prComments} PR comments`);
 
   const contributorStats = aggregateContributorStats(commits, pullRequests, workItems);
   const moduleStats = aggregateModuleStats(workItems);
   const top5 = calculateTop5(contributorStats, commits);
-  const highlights = generateHighlights(commits, pullRequests, workItems);
+  const highlights = generateHighlights(commits, pullRequests, workItems, prComments);
   const milestones = generateMilestones(commits, pullRequests, workItems, dateFrom, dateTo);
 
   const totalStats = {
     totalCommits: commits.length,
     totalPullRequests: pullRequests.length,
     totalReviews: pullRequests.reduce((acc, pr) => acc + (pr.reviewers?.length || 0), 0),
-    totalComments: 0,
+    totalComments: prComments,
     totalBugsFixed: workItems.filter(wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done").length,
     totalStoryPointsDone: workItems.reduce((acc, wi) => acc + (wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0), 0),
-    sprintsCompleted: Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)),
+    sprintsCompleted: dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0,
   };
 
   console.log(`[Azure DevOps] Aggregated ${contributorStats.length} contributors, ${moduleStats.length} modules`);
@@ -128,8 +161,8 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     projectName: config.project,
     version: "1.0",
     dateRange: {
-      start: dateFrom,
-      end: dateTo,
+      start: dateFrom || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      end: dateTo || new Date().toISOString().split("T")[0],
     },
     stats: totalStats,
     contributors: contributorStats,
@@ -142,8 +175,8 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 
 async function fetchCommits(
   config: AzureDevOpsConfig,
-  dateFrom: string,
-  dateTo: string
+  dateFrom?: string,
+  dateTo?: string
 ): Promise<AzureDevOpsCommit[]> {
   try {
     console.log(`[Azure DevOps] Fetching repositories...`);
@@ -161,9 +194,14 @@ async function fetchCommits(
     for (const repo of reposToFetch) {
       try {
         console.log(`[Azure DevOps] Fetching commits from repository: ${repo.name}`);
+        // Build query string - only add date filters if provided
+        let queryString = "$top=1000";
+        if (dateFrom) queryString += `&searchCriteria.fromDate=${dateFrom}`;
+        if (dateTo) queryString += `&searchCriteria.toDate=${dateTo}`;
+        
         const commitsResponse = await fetchAzureDevOps<{ value: AzureDevOpsCommit[] }>(
           config,
-          `/git/repositories/${repo.id}/commits?searchCriteria.fromDate=${dateFrom}&searchCriteria.toDate=${dateTo}&$top=1000`
+          `/git/repositories/${repo.id}/commits?${queryString}`
         );
         console.log(`[Azure DevOps] Found ${commitsResponse.value.length} commits in ${repo.name}`);
         allCommits.push(...commitsResponse.value);
@@ -211,72 +249,162 @@ async function fetchPullRequests(config: AzureDevOpsConfig): Promise<AzureDevOps
   }
 }
 
+async function fetchPullRequestComments(config: AzureDevOpsConfig): Promise<number> {
+  try {
+    console.log(`[Azure DevOps] Fetching PR comments...`);
+    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
+      config,
+      "/git/repositories"
+    );
+
+    let totalComments = 0;
+    const reposToFetch = reposResponse.value.slice(0, 10);
+
+    for (const repo of reposToFetch) {
+      try {
+        const prsResponse = await fetchAzureDevOps<{ value: AzureDevOpsPullRequest[] }>(
+          config,
+          `/git/repositories/${repo.id}/pullrequests?searchCriteria.status=all&$top=500`
+        );
+
+        for (const pr of prsResponse.value || []) {
+          try {
+            const threadsResponse = await fetchAzureDevOps<{ value: Array<{ comments: Array<any> }> }>(
+              config,
+              `/git/repositories/${repo.id}/pullrequests/${pr.pullRequestId}/threads`
+            );
+            
+            for (const thread of threadsResponse.value || []) {
+              totalComments += thread.comments?.length || 0;
+            }
+          } catch (error) {
+            // Continue if threads fail for a specific PR
+          }
+        }
+      } catch (error) {
+        console.warn(`[Azure DevOps] Failed to fetch PR comments for repo ${repo.name}:`, error);
+      }
+    }
+
+    console.log(`[Azure DevOps] Found ${totalComments} PR comments`);
+    return totalComments;
+  } catch (error) {
+    console.warn("[Azure DevOps] Failed to fetch PR comments:", error);
+    return 0; // Return 0 if this fails, don't break the whole process
+  }
+}
+
+async function fetchCommitChanges(
+  config: AzureDevOpsConfig,
+  dateFrom?: string,
+  dateTo?: string
+): Promise<any[]> {
+  try {
+    console.log(`[Azure DevOps] Fetching commit file changes...`);
+    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
+      config,
+      "/git/repositories"
+    );
+
+    const changes: any[] = [];
+    const reposToFetch = reposResponse.value.slice(0, 5); // Limit to 5 repos to avoid too many API calls
+
+    for (const repo of reposToFetch) {
+      try {
+        let queryString = "$top=100";
+        if (dateFrom) queryString += `&searchCriteria.fromDate=${dateFrom}`;
+        if (dateTo) queryString += `&searchCriteria.toDate=${dateTo}`;
+
+        const commitsResponse = await fetchAzureDevOps<{ value: AzureDevOpsCommit[] }>(
+          config,
+          `/git/repositories/${repo.id}/commits?${queryString}`
+        );
+
+        // For each commit, fetch its changes
+        for (const commit of commitsResponse.value || []) {
+          try {
+            const changesResponse = await fetchAzureDevOps<{ value: any[] }>(
+              config,
+              `/git/repositories/${repo.id}/commits/${commit.commitId}/changes`
+            );
+            changes.push(...(changesResponse.value || []));
+          } catch (error) {
+            // Continue if changes fail for a specific commit
+          }
+        }
+      } catch (error) {
+        console.warn(`[Azure DevOps] Failed to fetch changes for repo ${repo.name}:`, error);
+      }
+    }
+
+    console.log(`[Azure DevOps] Found ${changes.length} file changes`);
+    return changes;
+  } catch (error) {
+    console.warn("[Azure DevOps] Failed to fetch commit changes:", error);
+    return []; // Return empty array if this fails
+  }
+}
+
 async function fetchWorkItems(
   config: AzureDevOpsConfig,
-  dateFrom: string,
-  dateTo: string
+  dateFrom?: string,
+  dateTo?: string
 ): Promise<AzureDevOpsWorkItem[]> {
   try {
     console.log(`[Azure DevOps] Querying work items...`);
+    // Build WHERE clause - only add date filters if provided
+    let whereClause = `[System.TeamProject] = '${config.project}'`;
+    if (dateFrom && dateTo) {
+      whereClause += ` AND [System.CreatedDate] >= '${dateFrom}' AND [System.CreatedDate] <= '${dateTo}'`;
+    }
+    
     const wiqlQuery = {
-      query: `SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = '${config.project}' AND [System.CreatedDate] >= '${dateFrom}' AND [System.CreatedDate] <= '${dateTo}' ORDER BY [System.CreatedDate] DESC`,
+      query: `SELECT [System.Id] FROM workitems WHERE ${whereClause} ORDER BY [System.ChangedDate] DESC`,
     };
 
-    const wiqlBaseUrl = config.baseUrl 
-      ? `${config.baseUrl}/${config.organization}/${config.project}/_apis`
-      : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
-    
-    const queryResult = await fetch(
-      `${wiqlBaseUrl}/wit/wiql?api-version=7.0`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${Buffer.from(`:${config.personalAccessToken}`).toString("base64")}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(wiqlQuery),
-      }
+    // Use the main API helper with POST method for WIQL query
+    const queryData = await fetchAzureDevOps<{ workItems: Array<{ id: number }> }>(
+      config,
+      `/wit/wiql`,
+      "7.0",
+      "POST",
+      JSON.stringify(wiqlQuery)
     );
 
-    if (!queryResult.ok) {
-      const errorText = await queryResult.text();
-      console.error(`[Azure DevOps] WIQL query failed: ${queryResult.status} - ${errorText}`);
-      throw new Error(`WIQL query failed: ${queryResult.status}`);
-    }
+    // Get ALL work item IDs from the query (WIQL returns all results, but we'll process in batches)
+    const allWorkItemIds = queryData.workItems?.map((wi: { id: number }) => wi.id) || [];
 
-    const queryData = await queryResult.json();
-    const workItemIds = queryData.workItems?.slice(0, 500).map((wi: { id: number }) => wi.id) || [];
+    console.log(`[Azure DevOps] Found ${allWorkItemIds.length} work items total`);
 
-    console.log(`[Azure DevOps] Found ${workItemIds.length} work items`);
-
-    if (workItemIds.length === 0) {
+    if (allWorkItemIds.length === 0) {
       return [];
     }
 
+    // Process in batches of 200 (Azure DevOps API limit)
     const batchSize = 200;
     const workItems: AzureDevOpsWorkItem[] = [];
+    const totalBatches = Math.ceil(allWorkItemIds.length / batchSize);
 
-    for (let i = 0; i < workItemIds.length; i += batchSize) {
-      const batch = workItemIds.slice(i, i + batchSize);
-      console.log(`[Azure DevOps] Fetching work item details batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(workItemIds.length / batchSize)}`);
-      const detailsUrl = `${wiqlBaseUrl}/wit/workitems?ids=${batch.join(",")}&api-version=7.0`;
+    for (let i = 0; i < allWorkItemIds.length; i += batchSize) {
+      const batch = allWorkItemIds.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      console.log(`[Azure DevOps] Fetching work item details batch ${batchNumber}/${totalBatches} (${batch.length} items)`);
+      
+      try {
+        const detailsData = await fetchAzureDevOps<{ value: AzureDevOpsWorkItem[] }>(
+          config,
+          `/wit/workitems?ids=${batch.join(",")}&$expand=all`
+        );
 
-      const detailsResponse = await fetch(detailsUrl, {
-        headers: {
-          Authorization: `Basic ${Buffer.from(`:${config.personalAccessToken}`).toString("base64")}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (detailsResponse.ok) {
-        const detailsData = await detailsResponse.json();
         workItems.push(...(detailsData.value || []));
-      } else {
-        console.warn(`[Azure DevOps] Failed to fetch work item details batch: ${detailsResponse.status}`);
+        console.log(`[Azure DevOps] Batch ${batchNumber}: Retrieved ${(detailsData.value || []).length} items`);
+      } catch (batchError) {
+        console.warn(`[Azure DevOps] Error fetching batch ${batchNumber}, continuing with other batches...`);
+        // Continue with next batch even if one fails
       }
     }
 
-    console.log(`[Azure DevOps] Fetched details for ${workItems.length} work items`);
+    console.log(`[Azure DevOps] Fetched details for ${workItems.length} work items out of ${allWorkItemIds.length}`);
     return workItems;
   } catch (error) {
     console.error("[Azure DevOps] Failed to fetch work items:", error);
@@ -416,7 +544,8 @@ function calculateTop5(contributors: Contributor[], commits: AzureDevOpsCommit[]
 function generateHighlights(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
-  workItems: AzureDevOpsWorkItem[]
+  workItems: AzureDevOpsWorkItem[],
+  prComments: number = 0
 ): string[] {
   const highlights: string[] = [];
 
@@ -429,11 +558,42 @@ function generateHighlights(
     highlights.push(`${mergedPRs} pull requests merged`);
   }
 
+  if (prComments > 0) {
+    highlights.push(`${prComments} code review comments`);
+  }
+
+  // Count work items by type
+  const workItemsByType = new Map<string, number>();
+  for (const wi of workItems) {
+    const type = wi.fields["System.WorkItemType"] || "Unknown";
+    workItemsByType.set(type, (workItemsByType.get(type) || 0) + 1);
+  }
+
+  // Add type-specific highlights
+  const bugs = workItemsByType.get("Bug") || 0;
   const bugsFixed = workItems.filter(
     wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done"
   ).length;
   if (bugsFixed > 0) {
-    highlights.push(`${bugsFixed} bugs squashed`);
+    highlights.push(`${bugsFixed} bugs squashed out of ${bugs} total`);
+  } else if (bugs > 0) {
+    highlights.push(`${bugs} bugs tracked`);
+  }
+
+  // Check for other common work item types
+  const features = workItemsByType.get("Feature") || workItemsByType.get("User Story") || 0;
+  if (features > 0) {
+    highlights.push(`${features} features delivered`);
+  }
+
+  const testCases = workItemsByType.get("Test Case") || workItemsByType.get("Test Plan") || 0;
+  if (testCases > 0) {
+    highlights.push(`${testCases} test cases created`);
+  }
+
+  const srds = workItemsByType.get("Requirement") || workItemsByType.get("SRD") || 0;
+  if (srds > 0) {
+    highlights.push(`${srds} requirements documented`);
   }
 
   const totalStoryPoints = workItems.reduce(
@@ -449,29 +609,26 @@ function generateHighlights(
     highlights.push(`${uniqueContributors} team members contributed`);
   }
 
-  const features = workItems.filter(wi => wi.fields["System.WorkItemType"] === "User Story").length;
-  if (features > 0) {
-    highlights.push(`${features} user stories completed`);
-  }
-
-  return highlights.slice(0, 6);
+  return highlights.slice(0, 8);
 }
 
 function generateMilestones(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   workItems: AzureDevOpsWorkItem[],
-  dateFrom: string,
-  dateTo: string
+  dateFrom?: string,
+  dateTo?: string
 ): Milestone[] {
   const milestones: Milestone[] = [];
 
-  milestones.push({
-    date: dateFrom,
-    title: "Period Start",
-    description: "Beginning of the tracking period",
-    icon: "rocket",
-  });
+  if (dateFrom) {
+    milestones.push({
+      date: dateFrom,
+      title: "Period Start",
+      description: "Beginning of the tracking period",
+      icon: "rocket",
+    });
+  }
 
   if (commits.length > 0) {
     const sortedCommits = [...commits].sort(
@@ -495,7 +652,7 @@ function generateMilestones(
     });
   }
 
-  if (pullRequests.length >= 100) {
+  if (pullRequests.length >= 100 && dateTo) {
     milestones.push({
       date: dateTo,
       title: "100 PRs Milestone",
@@ -504,12 +661,14 @@ function generateMilestones(
     });
   }
 
-  milestones.push({
-    date: dateTo,
-    title: "Period End",
-    description: "End of tracking period",
-    icon: "lock",
-  });
+  if (dateTo) {
+    milestones.push({
+      date: dateTo,
+      title: "Period End",
+      description: "End of tracking period",
+      icon: "lock",
+    });
+  }
 
   return milestones.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }

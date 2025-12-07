@@ -8,9 +8,31 @@ $ErrorActionPreference = "Continue"
 Write-Host "Project-Wrapped Development Startup" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
+# Load environment variables from .env file if it exists
+Write-Host ""
+Write-Host "Loading environment variables..." -ForegroundColor Yellow
+$envFile = Join-Path $PSScriptRoot ".env"
+if (Test-Path $envFile) {
+    Write-Host "Found .env file, loading variables..." -ForegroundColor Gray
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^\s*([^#][^=]*)\s*=\s*(.*)$') {
+            $key = $matches[1].Trim()
+            $value = $matches[2].Trim()
+            [Environment]::SetEnvironmentVariable($key, $value, "Process")
+            if ($key -ne "AZURE_DEVOPS_PAT") {
+                Write-Host "   Loaded: $key" -ForegroundColor Gray
+            } else {
+                Write-Host "   Loaded: $key (***hidden***)" -ForegroundColor Gray
+            }
+        }
+    }
+} else {
+    Write-Host "No .env file found. Copy .env.example to .env and configure it." -ForegroundColor Yellow
+}
+
 # Database configuration
 $DB_CONTAINER_NAME = "project-wrapped-db"
-$DB_PASSWORD = "password"
+$DB_PASSWORD = if ($env:DATABASE_URL -match "postgres://.*:(.*)@") { $matches[1] } else { "password" }
 $DB_NAME = "projectwrapped"
 $DB_PORT = "5432"
 $DB_IMAGE = "postgres:latest"
@@ -89,20 +111,29 @@ if (-not $dbReady) {
     Write-Host "WARNING: Database startup timeout (it may still be initializing)" -ForegroundColor Yellow
 }
 
-# Set environment variables
+# Set environment variables (override with .env values if not already set)
 Write-Host ""
-Write-Host "Setting environment variables..." -ForegroundColor Yellow
-$env:DATABASE_URL = "postgresql://postgres:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}"
-$env:SESSION_SECRET = "dev-secret-key"
-$env:NODE_ENV = "development"
+Write-Host "Configuring environment variables..." -ForegroundColor Yellow
 
-# Optional: Set Azure DevOps PAT if you have one (for testing)
-# You can set this in your PowerShell profile or pass it as an environment variable
-# $env:AZURE_DEVOPS_PAT = "your-pat-token-here"
+# Set DATABASE_URL if not already set from .env
+if (-not $env:DATABASE_URL) {
+    $env:DATABASE_URL = "postgresql://postgres:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}"
+}
 
-Write-Host "OK: Environment variables set" -ForegroundColor Green
+# Set defaults for other required variables if not set from .env
+if (-not $env:SESSION_SECRET) {
+    $env:SESSION_SECRET = "dev-secret-key"
+}
+if (-not $env:NODE_ENV) {
+    $env:NODE_ENV = "development"
+}
+
+Write-Host "OK: Environment variables configured" -ForegroundColor Green
+Write-Host "   DATABASE_URL: $($env:DATABASE_URL)" -ForegroundColor Gray
 if ($env:AZURE_DEVOPS_PAT) {
-    Write-Host "   Note: Azure DevOps PAT configured from environment" -ForegroundColor Gray
+    Write-Host "   AZURE_DEVOPS_PAT: ***configured***" -ForegroundColor Gray
+} else {
+    Write-Host "   AZURE_DEVOPS_PAT: not set (optional)" -ForegroundColor Gray
 }
 
 # Start the development server

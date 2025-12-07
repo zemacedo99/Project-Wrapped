@@ -86,7 +86,7 @@ export async function registerRoutes(
 
   app.post("/api/connect/azure-devops", async (req, res) => {
     try {
-      const { organization, project, personalAccessToken, dateFrom, dateTo } = req.body;
+      const { organization, project, personalAccessToken, baseUrl, dateFrom, dateTo } = req.body;
 
       const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
       if (validationErrors.length > 0) {
@@ -98,6 +98,7 @@ export async function registerRoutes(
         organization,
         project,
         personalAccessToken,
+        baseUrl,
         dateFrom,
         dateTo,
       });
@@ -117,7 +118,7 @@ export async function registerRoutes(
 
   app.post("/api/test/azure-devops", async (req, res) => {
     try {
-      const { organization, project, personalAccessToken } = req.body;
+      const { organization, project, personalAccessToken, baseUrl } = req.body;
 
       const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
       if (validationErrors.length > 0) {
@@ -129,6 +130,7 @@ export async function registerRoutes(
         organization,
         project,
         personalAccessToken,
+        baseUrl,
       });
 
       if (result.success) {

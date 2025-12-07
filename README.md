@@ -1,84 +1,188 @@
-# Project-Wrapped (Wrapped-Insights)
+# Project-Wrapped
 
-Description
-- This repository contains the code for Wrapped-Insights (live at https://replit.com/@ZeMacedo1/Wrapped-Insights).
-- It is a full‑stack TypeScript application (front-end + back-end) that provides the Wrapped-Insights web app experience. The project uses React for the client UI and an Express/TypeScript server for API/backend logic.
+A **Spotify Wrapped-style** web application that visualizes your Azure DevOps project statistics in an engaging, interactive presentation.
 
-What this repo is for
-- Hosts the Wrapped-Insights web application codebase (client and server).
-- Implements API endpoints and server logic (server/index.ts).
-- Manages database schema and migrations using Drizzle ORM / drizzle-kit.
+## What is this?
 
-Tech stack
-- Language: TypeScript (primary)
-- Front-end: React, Vite
-- Back-end: Express (server/index.ts)
-- Database/ORM: PostgreSQL + drizzle-orm (drizzle-kit)
-- Auth/session: passport, express-session
-- Dev tools: tsx, TypeScript, Vite
+Project-Wrapped takes your Azure DevOps data and transforms it into a beautiful "year in review" experience, similar to Spotify Wrapped. It shows your team's achievements, top contributors, busiest days, and key milestones in an animated slideshow format.
 
-Prerequisites
-- Node.js (recommended: Node 18+)
-- npm
-- PostgreSQL (for local DB usage) or a managed Postgres instance
-- Git
+## Features
 
-Local setup
-1. Clone the repository:
-   git clone https://github.com/zemacedo99/Project-Wrapped.git
-   cd Project-Wrapped
-2. Install dependencies:
-   npm install
+- 📊 **Global Stats** - Total commits, PRs, code reviews, comments, bugs fixed, story points
+- 🏆 **Champions** - Top 10 contributors ranked by activity
+- 📁 **Modules** - Breakdown by project areas/teams
+- 🥇 **Top 5 Rankings** - Most commits, most PRs, most reviews, busiest days
+- ⭐ **Highlights** - Auto-generated achievements (e.g., "3,341 commits pushed")
+- 📅 **Timeline** - Key milestones throughout the period
+- 🎨 **Interactive UI** - Animated slides with smooth transitions
 
-Environment variables
-Create a .env file or set environment variables required by the app. Common variables expected by projects of this structure include:
-- DATABASE_URL — Postgres connection string used by drizzle / pg
-- SESSION_SECRET — secret for express-session
-- NODE_ENV — development or production (optional)
-- PORT — server port (optional)
+## Data Sources
 
-Check server/index.ts and other config files for any additional required variables (OAuth keys, third-party API keys, etc.).
+Connects to Azure DevOps (cloud or on-premises) and fetches:
+- Git commits from all repositories
+- Pull requests with reviewer data
+- PR discussion comments
+- Work items (Bugs, Features, Test Cases, Requirements, etc.)
+- File change history
 
-Database
-- To apply schema changes with Drizzle:
-  npm run db:push
-- Ensure DATABASE_URL points to a running Postgres instance before running db commands.
+## Tech Stack
 
-Run (development)
-- Start the app in development with hot reload:
-  npm run dev
-- This runs the server entry (server/index.ts) via tsx with NODE_ENV=development. The front-end dev server (Vite) may be integrated or require a separate start depending on the project structure.
+- **Frontend**: React, TypeScript, Vite, Tailwind CSS, Radix UI
+- **Backend**: Express.js, TypeScript
+- **Database**: PostgreSQL with Drizzle ORM
+- **API**: Azure DevOps REST API
 
-Build and run (production)
-- Build:
-  npm run build
-- Start production server:
-  npm start
+## Prerequisites
 
-Scripts (from package.json)
-- npm run dev — development server (NODE_ENV=development tsx server/index.ts)
-- npm run build — build for production (tsx script/build.ts)
-- npm start — run production bundle (NODE_ENV=production node dist/index.cjs)
-- npm run check — run TypeScript type checks (tsc)
-- npm run db:push — push DB schema changes (drizzle-kit)
+- Node.js 18+
+- PostgreSQL database
+- Azure DevOps Personal Access Token (PAT) with permissions:
+  - Code (Read)
+  - Work Items (Read)
 
-Replit
-- The repository references a Replit project. On Replit, set the run command to:
-  npm run dev
-  or use the production command:
-  npm start
-- Add environment variables (DATABASE_URL, SESSION_SECRET, etc.) via Replit Secrets.
+## Quick Start
 
-Troubleshooting
-- If DB-related errors occur, verify DATABASE_URL and run npm run db:push.
-- Sessions require SESSION_SECRET; without it, session behavior may be unstable.
-- If the front-end is served separately, you may need to run the Vite dev server or adjust the run command.
+### 1. Clone and Install
 
-License
-- MIT (as declared in package.json)
+```bash
+git clone https://github.com/zemacedo99/Project-Wrapped.git
+cd Project-Wrapped
+npm install
+```
 
-Contributing
-- Fork the repo, create a branch, make changes, run npm run check, and open a pull request.
+### 2. Configure Environment
 
-Contact
-- For questions about the codebase, open an issue in this repository.
+Create a `.env` file:
+
+```env
+DATABASE_URL=postgresql://postgres:password@localhost:5432/project_wrapped
+SESSION_SECRET=your-secret-key
+NODE_ENV=development
+```
+
+### 3. Setup Database
+
+```bash
+# Start PostgreSQL (if using Docker)
+docker run --name project-wrapped-db -e POSTGRES_PASSWORD=password -e POSTGRES_DB=project_wrapped -p 5432:5432 -d postgres
+
+# Push schema
+npm run db:push
+```
+
+### 4. Run Development Server
+
+```bash
+# Windows (recommended)
+.\start-dev.bat
+
+# Or manually
+npm run dev
+```
+
+### 5. Open the App
+
+Navigate to `http://localhost:5000`
+
+## Usage
+
+### Creating a Wrapped Project
+
+1. Open the app in your browser
+2. Enter your Azure DevOps details:
+   - **Organization/Collection**: Your Azure DevOps organization name (e.g., "MyOrg")
+   - **Project**: Project name (e.g., "MyProject")
+   - **Personal Access Token**: Your PAT with Code and Work Items read permissions
+   - **Base URL** (optional): For on-premises servers (e.g., `https://tfs.mycompany.com/`)
+   - **Date Range** (optional): Filter to specific time period
+3. Click "Create Wrapped"
+4. Watch your project's story unfold!
+
+### API Endpoints
+
+```bash
+# Create a wrapped project
+POST /api/connect/azure-devops
+{
+  "organization": "MyOrg",
+  "project": "MyProject",
+  "personalAccessToken": "your-pat-token",
+  "baseUrl": "https://dev.azure.com/",  # optional
+  "dateFrom": "2024-01-01",              # optional
+  "dateTo": "2024-12-31"                 # optional
+}
+
+# Get wrapped project data
+GET /api/wrapped/{project-id}
+```
+
+## Project Structure
+
+```
+Project-Wrapped/
+├── client/                 # React frontend
+│   └── src/
+│       ├── components/     # UI components
+│       │   └── slides/     # Wrapped presentation slides
+│       ├── pages/          # Page components
+│       └── hooks/          # Custom React hooks
+├── server/                 # Express backend
+│   ├── services/
+│   │   └── azure-devops.ts # Azure DevOps API integration
+│   └── routes.ts           # API routes
+├── shared/                 # Shared types/schemas
+│   └── schema.ts           # Database schema & types
+└── start-dev.bat           # Windows development startup script
+```
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start development server |
+| `npm run build` | Build for production |
+| `npm start` | Run production build |
+| `npm run check` | TypeScript type checking |
+| `npm run db:push` | Push database schema changes |
+
+## Azure DevOps API Endpoints Used
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/git/repositories` | List all repositories |
+| `/git/repositories/{id}/commits` | Get commits |
+| `/git/repositories/{id}/pullrequests` | Get pull requests |
+| `/git/repositories/{id}/pullrequests/{id}/threads` | Get PR comments |
+| `/wit/wiql` | Query work items |
+| `/wit/workitems` | Get work item details |
+
+## Troubleshooting
+
+### Database Connection Error
+- Verify PostgreSQL is running
+- Check `DATABASE_URL` in `.env`
+- Run `npm run db:push` to initialize schema
+
+### Azure DevOps Authentication Error
+- Verify PAT has correct permissions (Code: Read, Work Items: Read)
+- Check organization and project names are correct
+- For on-premises, ensure `baseUrl` is set correctly
+
+### SSL Certificate Error (On-Premises)
+- The app automatically disables SSL verification for on-premises servers with self-signed certificates
+
+## License
+
+MIT
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run `npm run check` to verify TypeScript
+5. Submit a pull request
+
+## Author
+
+Created by [@zemacedo99](https://github.com/zemacedo99)
