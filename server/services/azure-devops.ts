@@ -4,6 +4,7 @@ interface AzureDevOpsConfig {
   organization: string;
   project: string;
   personalAccessToken: string;
+  baseUrl?: string; // Optional: for on-premises Azure DevOps Server (defaults to cloud)
   repositoryId?: string;
   dateFrom?: string;
   dateTo?: string;
@@ -54,7 +55,10 @@ async function fetchAzureDevOps<T>(
   apiPath: string,
   apiVersion: string = "7.0"
 ): Promise<T> {
-  const baseUrl = `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
+  // Support both cloud (dev.azure.com) and on-premises Azure DevOps Server
+  const baseUrl = config.baseUrl 
+    ? `${config.baseUrl}/${config.project}/_apis`
+    : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
   const url = `${baseUrl}${apiPath}${apiPath.includes("?") ? "&" : "?"}api-version=${apiVersion}`;
 
   console.log(`[Azure DevOps] Fetching: ${apiPath}`);
@@ -215,8 +219,12 @@ async function fetchWorkItems(
       query: `SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = '${config.project}' AND [System.CreatedDate] >= '${dateFrom}' AND [System.CreatedDate] <= '${dateTo}' ORDER BY [System.CreatedDate] DESC`,
     };
 
+    const wiqlBaseUrl = config.baseUrl 
+      ? `${config.baseUrl}/${config.project}/_apis`
+      : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
+    
     const queryResult = await fetch(
-      `https://dev.azure.com/${config.organization}/${config.project}/_apis/wit/wiql?api-version=7.0`,
+      `${wiqlBaseUrl}/wit/wiql?api-version=7.0`,
       {
         method: "POST",
         headers: {
@@ -248,7 +256,7 @@ async function fetchWorkItems(
     for (let i = 0; i < workItemIds.length; i += batchSize) {
       const batch = workItemIds.slice(i, i + batchSize);
       console.log(`[Azure DevOps] Fetching work item details batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(workItemIds.length / batchSize)}`);
-      const detailsUrl = `https://dev.azure.com/${config.organization}/${config.project}/_apis/wit/workitems?ids=${batch.join(",")}&api-version=7.0`;
+      const detailsUrl = `${wiqlBaseUrl}/wit/workitems?ids=${batch.join(",")}&api-version=7.0`;
 
       const detailsResponse = await fetch(detailsUrl, {
         headers: {
@@ -528,7 +536,7 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
     // Test 1: Fetch project details
     const projectResponse = await fetchAzureDevOps<{ name: string; description: string }>(
       config,
-      \"/\" // Project endpoint
+      "/" // Project endpoint
     );
     
     console.log(`[Azure DevOps] Successfully connected to project: ${projectResponse.name}`);
@@ -536,7 +544,7 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
     // Test 2: Check repository access
     const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
       config,
-      \"/git/repositories\"
+      "/git/repositories"
     );
     
     console.log(`[Azure DevOps] Found ${reposResponse.value.length} repositories`);
@@ -551,10 +559,10 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
       }
     };
   } catch (error) {
-    console.error(\"[Azure DevOps] Connection test failed:\", error);
+    console.error("[Azure DevOps] Connection test failed:", error);
     return {
       success: false,
-      message: error instanceof Error ? error.message : \"Connection test failed\",
+      message: error instanceof Error ? error.message : "Connection test failed",
     };
   }
 }

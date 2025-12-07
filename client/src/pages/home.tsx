@@ -25,6 +25,7 @@ export default function Home() {
     organization: "",
     project: "",
     personalAccessToken: "",
+    baseUrl: "",
     dateFrom: "",
     dateTo: "",
   });
@@ -173,6 +174,7 @@ export default function Home() {
           organization: azureForm.organization,
           project: azureForm.project,
           personalAccessToken: azureForm.personalAccessToken,
+          baseUrl: azureForm.baseUrl || undefined,
         }),
       });
       
@@ -439,6 +441,23 @@ export default function Home() {
           </DialogHeader>
           <form onSubmit={handleAzureSubmit} className="space-y-4">
             <div className="space-y-2">
+              <Label htmlFor="azure-base-url">Base URL (Optional)</Label>
+              <Input
+                id="azure-base-url"
+                placeholder="https://dev.azure.com/your-org OR https://your-server/collection"
+                value={azureForm.baseUrl}
+                onChange={(e) => {
+                  setAzureForm({ ...azureForm, baseUrl: e.target.value });
+                  setConnectionTestResult(null);
+                }}
+                data-testid="input-azure-base-url"
+              />
+              <p className="text-xs text-muted-foreground">
+                For cloud: https://dev.azure.com/<strong>your-org</strong><br />
+                For on-premises: https://<strong>your-server</strong>/<strong>collection</strong>
+              </p>
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="azure-org">Organization</Label>
               <Input
                 id="azure-org"
@@ -452,7 +471,7 @@ export default function Home() {
                 data-testid="input-azure-org"
               />
               <p className="text-xs text-muted-foreground">
-                From: https://dev.azure.com/<strong>your-organization</strong>
+                Collection name for on-premises, organization for cloud
               </p>
             </div>
             <div className="space-y-2">
