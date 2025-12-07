@@ -1,5 +1,5 @@
 import https from "https";
-import type { ProjectWrappedData, Contributor, Module, Milestone, Top5 } from "@shared/schema";
+import type { ProjectWrappedData, Contributor, Module, Milestone, Top5, RepositoryStats, ActivityPattern } from "@shared/schema";
 
 interface AzureDevOpsConfig {
   organization: string;
@@ -19,6 +19,11 @@ interface AzureDevOpsCommit {
     date: string;
   };
   comment: string;
+  changeCounts?: {
+    Add: number;
+    Edit: number;
+    Delete: number;
+  };
 }
 
 interface AzureDevOpsPullRequest {
@@ -34,6 +39,10 @@ interface AzureDevOpsPullRequest {
     displayName: string;
     vote: number;
   }>;
+  repository?: {
+    id: string;
+    name: string;
+  };
 }
 
 interface AzureDevOpsWorkItem {
@@ -129,7 +138,10 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     console.log(`[Azure DevOps] Fetching all commits (no date filter)`);
   }
 
-  const [commits, pullRequests, workItems, prComments, commits_with_files] = await Promise.all([
+  // Fetch repositories first to get repo-level stats
+  const repositories = await fetchRepositories(config);
+  
+  const [commits, pullRequests, workItems, prComments, fileChanges] = await Promise.all([
     fetchCommits(config, dateFrom, dateTo),
     fetchPullRequests(config),
     fetchWorkItems(config, dateFrom, dateTo),
@@ -139,12 +151,22 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 
   console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items, ${prComments} PR comments`);
 
-  const contributorStats = aggregateContributorStats(commits, pullRequests, workItems);
+  // Calculate enhanced stats
+  const prMergeStats = calculatePrMergeStats(pullRequests);
+  const activityPattern = calculateActivityPattern(commits);
+  const streakData = calculateStreaks(commits);
+  const codeChanges = aggregateCodeChanges(fileChanges);
+  const repoStats = aggregateRepositoryStats(commits, pullRequests, repositories);
+  const workItemBreakdown = aggregateWorkItemTypes(workItems);
+
+  const contributorStats = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData);
   const moduleStats = aggregateModuleStats(workItems);
-  const top5 = calculateTop5(contributorStats, commits);
-  const highlights = generateHighlights(commits, pullRequests, workItems, prComments);
+  const top5 = calculateTop5(contributorStats, commits, streakData);
+  const highlights = generateHighlights(commits, pullRequests, workItems, prComments, codeChanges, activityPattern);
+  const funFacts = generateFunFacts(commits, pullRequests, workItems, activityPattern, prMergeStats, streakData);
   const milestones = generateMilestones(commits, pullRequests, workItems, dateFrom, dateTo);
 
+  const mergedPrs = pullRequests.filter(pr => pr.status === "completed").length;
   const totalStats = {
     totalCommits: commits.length,
     totalPullRequests: pullRequests.length,
@@ -153,6 +175,16 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     totalBugsFixed: workItems.filter(wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done").length,
     totalStoryPointsDone: workItems.reduce((acc, wi) => acc + (wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0), 0),
     sprintsCompleted: dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0,
+    // Enhanced stats
+    totalLinesAdded: codeChanges.linesAdded,
+    totalLinesDeleted: codeChanges.linesDeleted,
+    totalFilesChanged: codeChanges.filesChanged,
+    totalRepositories: repositories.length,
+    avgPrMergeTimeHours: prMergeStats.avgMergeTimeHours,
+    fastestPrMergeTimeHours: prMergeStats.fastestMergeTimeHours,
+    longestStreak: streakData.longestStreak,
+    totalWorkItems: workItems.length,
+    prMergeRate: pullRequests.length > 0 ? Math.round((mergedPrs / pullRequests.length) * 100) : 0,
   };
 
   console.log(`[Azure DevOps] Aggregated ${contributorStats.length} contributors, ${moduleStats.length} modules`);
@@ -170,7 +202,223 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     top5,
     highlights,
     milestones,
+    // Enhanced data
+    repositories: repoStats,
+    activityPattern,
+    funFacts,
+    workItemBreakdown,
   };
+}
+
+// Helper function to fetch repositories
+async function fetchRepositories(config: AzureDevOpsConfig): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
+      config,
+      "/git/repositories"
+    );
+    return reposResponse.value || [];
+  } catch (error) {
+    console.warn("[Azure DevOps] Failed to fetch repositories:", error);
+    return [];
+  }
+}
+
+// Calculate PR merge time statistics
+function calculatePrMergeStats(pullRequests: AzureDevOpsPullRequest[]): { 
+  avgMergeTimeHours: number; 
+  fastestMergeTimeHours: number;
+  mergeTimeByAuthor: Map<string, number[]>;
+} {
+  const mergeTimeByAuthor = new Map<string, number[]>();
+  const mergeTimes: number[] = [];
+
+  for (const pr of pullRequests) {
+    if (pr.status === "completed" && pr.closedDate && pr.creationDate) {
+      const created = new Date(pr.creationDate).getTime();
+      const closed = new Date(pr.closedDate).getTime();
+      const hoursToMerge = (closed - created) / (1000 * 60 * 60);
+      
+      if (hoursToMerge > 0 && hoursToMerge < 8760) { // Less than 1 year
+        mergeTimes.push(hoursToMerge);
+        
+        const author = pr.createdBy.displayName;
+        if (!mergeTimeByAuthor.has(author)) {
+          mergeTimeByAuthor.set(author, []);
+        }
+        mergeTimeByAuthor.get(author)!.push(hoursToMerge);
+      }
+    }
+  }
+
+  return {
+    avgMergeTimeHours: mergeTimes.length > 0 ? Math.round(mergeTimes.reduce((a, b) => a + b, 0) / mergeTimes.length) : 0,
+    fastestMergeTimeHours: mergeTimes.length > 0 ? Math.round(Math.min(...mergeTimes) * 10) / 10 : 0,
+    mergeTimeByAuthor,
+  };
+}
+
+// Calculate activity patterns (hour of day, day of week)
+function calculateActivityPattern(commits: AzureDevOpsCommit[]): ActivityPattern {
+  const hourlyDistribution = new Array(24).fill(0);
+  const dailyDistribution = new Array(7).fill(0);
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  for (const commit of commits) {
+    const date = new Date(commit.author.date);
+    hourlyDistribution[date.getHours()]++;
+    dailyDistribution[date.getDay()]++;
+  }
+
+  const busiestHour = hourlyDistribution.indexOf(Math.max(...hourlyDistribution));
+  const busiestDayIndex = dailyDistribution.indexOf(Math.max(...dailyDistribution));
+  
+  let peakProductivityTime: string;
+  if (busiestHour >= 5 && busiestHour < 12) {
+    peakProductivityTime = "Morning";
+  } else if (busiestHour >= 12 && busiestHour < 17) {
+    peakProductivityTime = "Afternoon";
+  } else if (busiestHour >= 17 && busiestHour < 21) {
+    peakProductivityTime = "Evening";
+  } else {
+    peakProductivityTime = "Night";
+  }
+
+  return {
+    hourlyDistribution,
+    dailyDistribution,
+    busiestHour,
+    busiestDay: dayNames[busiestDayIndex],
+    peakProductivityTime,
+  };
+}
+
+// Calculate commit streaks
+function calculateStreaks(commits: AzureDevOpsCommit[]): {
+  longestStreak: number;
+  streaksByAuthor: Map<string, number>;
+} {
+  const commitsByAuthorAndDate = new Map<string, Set<string>>();
+  
+  for (const commit of commits) {
+    const author = commit.author.name;
+    const date = commit.author.date.split("T")[0];
+    
+    if (!commitsByAuthorAndDate.has(author)) {
+      commitsByAuthorAndDate.set(author, new Set());
+    }
+    commitsByAuthorAndDate.get(author)!.add(date);
+  }
+
+  const streaksByAuthor = new Map<string, number>();
+  let longestStreak = 0;
+
+  Array.from(commitsByAuthorAndDate.entries()).forEach(([author, dates]) => {
+    const sortedDates: string[] = Array.from(dates).sort();
+    let currentStreak = 1;
+    let maxStreak = 1;
+
+    for (let i = 1; i < sortedDates.length; i++) {
+      const prevDate = new Date(sortedDates[i - 1]);
+      const currDate = new Date(sortedDates[i]);
+      const diffDays = (currDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24);
+
+      if (diffDays === 1) {
+        currentStreak++;
+        maxStreak = Math.max(maxStreak, currentStreak);
+      } else {
+        currentStreak = 1;
+      }
+    }
+
+    streaksByAuthor.set(author, maxStreak);
+    longestStreak = Math.max(longestStreak, maxStreak);
+  });
+
+  return { longestStreak, streaksByAuthor };
+}
+
+// Aggregate code changes from file changes
+function aggregateCodeChanges(fileChanges: any[]): {
+  linesAdded: number;
+  linesDeleted: number;
+  filesChanged: number;
+} {
+  let linesAdded = 0;
+  let linesDeleted = 0;
+  const filesChanged = new Set<string>();
+
+  for (const change of fileChanges) {
+    if (change.item?.path) {
+      filesChanged.add(change.item.path);
+    }
+    // Azure DevOps change types: add, edit, delete
+    if (change.changeType === "add" || change.changeType === "edit") {
+      linesAdded += change.item?.contentLength || 0;
+    }
+  }
+
+  return {
+    linesAdded,
+    linesDeleted,
+    filesChanged: filesChanged.size,
+  };
+}
+
+// Aggregate repository-level stats
+function aggregateRepositoryStats(
+  commits: AzureDevOpsCommit[],
+  pullRequests: AzureDevOpsPullRequest[],
+  repositories: Array<{ id: string; name: string }>
+): RepositoryStats[] {
+  const repoStats = new Map<string, RepositoryStats>();
+
+  // Initialize from repositories list
+  for (const repo of repositories) {
+    repoStats.set(repo.name, {
+      name: repo.name,
+      commits: 0,
+      pullRequests: 0,
+      contributors: 0,
+    });
+  }
+
+  // Count commits per repo (we need to track this during fetch)
+  const contributorsByRepo = new Map<string, Set<string>>();
+
+  for (const commit of commits) {
+    // Track unique contributors
+    const author = commit.author.name;
+    Array.from(repoStats.keys()).forEach(repoName => {
+      if (!contributorsByRepo.has(repoName)) {
+        contributorsByRepo.set(repoName, new Set());
+      }
+    });
+  }
+
+  // Update contributor counts
+  Array.from(contributorsByRepo.entries()).forEach(([repoName, contributors]) => {
+    const stats = repoStats.get(repoName);
+    if (stats) {
+      stats.contributors = contributors.size;
+    }
+  });
+
+  return Array.from(repoStats.values())
+    .sort((a, b) => b.commits - a.commits)
+    .slice(0, 10);
+}
+
+// Aggregate work item types
+function aggregateWorkItemTypes(workItems: AzureDevOpsWorkItem[]): Record<string, number> {
+  const breakdown: Record<string, number> = {};
+  
+  for (const wi of workItems) {
+    const type = wi.fields["System.WorkItemType"] || "Unknown";
+    breakdown[type] = (breakdown[type] || 0) + 1;
+  }
+
+  return breakdown;
 }
 
 async function fetchCommits(
@@ -415,9 +663,14 @@ async function fetchWorkItems(
 function aggregateContributorStats(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
-  workItems: AzureDevOpsWorkItem[]
+  workItems: AzureDevOpsWorkItem[],
+  prMergeStats: { mergeTimeByAuthor: Map<string, number[]> },
+  streakData: { streaksByAuthor: Map<string, number> }
 ): Contributor[] {
   const contributorMap = new Map<string, Contributor>();
+
+  // Track commit hours for favorite hour calculation
+  const commitHoursByAuthor = new Map<string, number[]>();
 
   for (const commit of commits) {
     const name = commit.author.name;
@@ -430,9 +683,19 @@ function aggregateContributorStats(
         commentsWritten: 0,
         bugsFixed: 0,
         storyPointsDone: 0,
+        linesAdded: 0,
+        linesDeleted: 0,
+        avgPrMergeTimeHours: 0,
+        longestStreak: 0,
+        favoriteHour: 0,
       });
+      commitHoursByAuthor.set(name, new Array(24).fill(0));
     }
     contributorMap.get(name)!.commits++;
+    
+    // Track commit hour
+    const hour = new Date(commit.author.date).getHours();
+    commitHoursByAuthor.get(name)![hour]++;
   }
 
   for (const pr of pullRequests) {
@@ -446,7 +709,13 @@ function aggregateContributorStats(
         commentsWritten: 0,
         bugsFixed: 0,
         storyPointsDone: 0,
+        linesAdded: 0,
+        linesDeleted: 0,
+        avgPrMergeTimeHours: 0,
+        longestStreak: 0,
+        favoriteHour: 0,
       });
+      commitHoursByAuthor.set(name, new Array(24).fill(0));
     }
     contributorMap.get(name)!.pullRequestsOpened++;
 
@@ -460,7 +729,13 @@ function aggregateContributorStats(
           commentsWritten: 0,
           bugsFixed: 0,
           storyPointsDone: 0,
+          linesAdded: 0,
+          linesDeleted: 0,
+          avgPrMergeTimeHours: 0,
+          longestStreak: 0,
+          favoriteHour: 0,
         });
+        commitHoursByAuthor.set(reviewer.displayName, new Array(24).fill(0));
       }
       contributorMap.get(reviewer.displayName)!.pullRequestsReviewed++;
     }
@@ -475,6 +750,24 @@ function aggregateContributorStats(
       contributorMap.get(assignee)!.storyPointsDone += wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0;
     }
   }
+
+  // Add PR merge time and streak data
+  Array.from(contributorMap.entries()).forEach(([name, contributor]) => {
+    // Average PR merge time
+    const mergeTimes = prMergeStats.mergeTimeByAuthor.get(name);
+    if (mergeTimes && mergeTimes.length > 0) {
+      contributor.avgPrMergeTimeHours = Math.round(mergeTimes.reduce((a, b) => a + b, 0) / mergeTimes.length);
+    }
+
+    // Longest streak
+    contributor.longestStreak = streakData.streaksByAuthor.get(name) || 0;
+
+    // Favorite hour
+    const hours = commitHoursByAuthor.get(name);
+    if (hours) {
+      contributor.favoriteHour = hours.indexOf(Math.max(...hours));
+    }
+  });
 
   return Array.from(contributorMap.values())
     .sort((a, b) => b.commits - a.commits)
@@ -508,7 +801,11 @@ function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
     .slice(0, 6);
 }
 
-function calculateTop5(contributors: Contributor[], commits: AzureDevOpsCommit[]): Top5 {
+function calculateTop5(
+  contributors: Contributor[], 
+  commits: AzureDevOpsCommit[],
+  streakData: { streaksByAuthor: Map<string, number> }
+): Top5 {
   const commitsByDate = new Map<string, number>();
   for (const commit of commits) {
     const date = commit.author.date.split("T")[0];
@@ -520,24 +817,31 @@ function calculateTop5(contributors: Contributor[], commits: AzureDevOpsCommit[]
     .slice(0, 5)
     .map(([date, count]) => ({ date, commits: count }));
 
+  // Create sorted copies to avoid mutating original array
+  const sortedByCommits = [...contributors].sort((a, b) => b.commits - a.commits);
+  const sortedByPRsOpened = [...contributors].sort((a, b) => b.pullRequestsOpened - a.pullRequestsOpened);
+  const sortedByPRsReviewed = [...contributors].sort((a, b) => b.pullRequestsReviewed - a.pullRequestsReviewed);
+  const sortedByComments = [...contributors].sort((a, b) => b.commentsWritten - a.commentsWritten);
+  const sortedByStreaks = [...contributors].sort((a, b) => (b.longestStreak || 0) - (a.longestStreak || 0));
+
   return {
-    mostCommits: contributors
-      .sort((a, b) => b.commits - a.commits)
+    mostCommits: sortedByCommits
       .slice(0, 5)
       .map(c => ({ name: c.name, commits: c.commits })),
-    mostPullRequestsOpened: contributors
-      .sort((a, b) => b.pullRequestsOpened - a.pullRequestsOpened)
+    mostPullRequestsOpened: sortedByPRsOpened
       .slice(0, 5)
       .map(c => ({ name: c.name, pullRequestsOpened: c.pullRequestsOpened })),
-    mostPullRequestsReviewed: contributors
-      .sort((a, b) => b.pullRequestsReviewed - a.pullRequestsReviewed)
+    mostPullRequestsReviewed: sortedByPRsReviewed
       .slice(0, 5)
       .map(c => ({ name: c.name, pullRequestsReviewed: c.pullRequestsReviewed })),
-    mostCommentsWritten: contributors
-      .sort((a, b) => b.commentsWritten - a.commentsWritten)
+    mostCommentsWritten: sortedByComments
       .slice(0, 5)
       .map(c => ({ name: c.name, commentsWritten: c.commentsWritten })),
     busiestDaysByCommits: busiestDays,
+    longestStreaks: sortedByStreaks
+      .filter(c => (c.longestStreak || 0) > 0)
+      .slice(0, 5)
+      .map(c => ({ name: c.name, commits: c.longestStreak || 0 })),
   };
 }
 
@@ -545,7 +849,9 @@ function generateHighlights(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   workItems: AzureDevOpsWorkItem[],
-  prComments: number = 0
+  prComments: number = 0,
+  codeChanges: { linesAdded: number; linesDeleted: number; filesChanged: number },
+  activityPattern: ActivityPattern
 ): string[] {
   const highlights: string[] = [];
 
@@ -559,7 +865,13 @@ function generateHighlights(
   }
 
   if (prComments > 0) {
-    highlights.push(`${prComments} code review comments`);
+    highlights.push(`${prComments.toLocaleString()} code review comments`);
+  }
+
+  // Enhanced: Lines of code
+  if (codeChanges.linesAdded > 0 || codeChanges.linesDeleted > 0) {
+    const netLines = codeChanges.linesAdded - codeChanges.linesDeleted;
+    highlights.push(`${codeChanges.filesChanged.toLocaleString()} files modified`);
   }
 
   // Count work items by type
@@ -609,7 +921,109 @@ function generateHighlights(
     highlights.push(`${uniqueContributors} team members contributed`);
   }
 
-  return highlights.slice(0, 8);
+  // Enhanced: Activity pattern highlight
+  if (activityPattern.peakProductivityTime) {
+    highlights.push(`Peak productivity: ${activityPattern.peakProductivityTime} (${activityPattern.busiestHour}:00)`);
+  }
+
+  return highlights.slice(0, 10);
+}
+
+function generateFunFacts(
+  commits: AzureDevOpsCommit[],
+  pullRequests: AzureDevOpsPullRequest[],
+  workItems: AzureDevOpsWorkItem[],
+  activityPattern: ActivityPattern,
+  prMergeStats: { avgMergeTimeHours: number; fastestMergeTimeHours: number },
+  streakData: { longestStreak: number }
+): string[] {
+  const funFacts: string[] = [];
+
+  // Fun fact: busiest day
+  if (activityPattern.busiestDay) {
+    funFacts.push(`${activityPattern.busiestDay} was the team's favorite day to code`);
+  }
+
+  // Fun fact: night owl or early bird
+  if (activityPattern.busiestHour >= 22 || activityPattern.busiestHour <= 5) {
+    funFacts.push(`🦉 Night owl detected! Most commits at ${activityPattern.busiestHour}:00`);
+  } else if (activityPattern.busiestHour >= 5 && activityPattern.busiestHour <= 8) {
+    funFacts.push(`🐦 Early bird! Most commits at ${activityPattern.busiestHour}:00`);
+  }
+
+  // Fun fact: PR merge speed
+  if (prMergeStats.avgMergeTimeHours > 0) {
+    if (prMergeStats.avgMergeTimeHours < 24) {
+      funFacts.push(`⚡ Lightning fast! Average PR merged in ${Math.round(prMergeStats.avgMergeTimeHours)} hours`);
+    } else {
+      const days = Math.round(prMergeStats.avgMergeTimeHours / 24);
+      funFacts.push(`📋 PRs took ${days} day${days > 1 ? 's' : ''} on average to merge`);
+    }
+  }
+
+  // Fun fact: fastest PR
+  if (prMergeStats.fastestMergeTimeHours > 0 && prMergeStats.fastestMergeTimeHours < 1) {
+    funFacts.push(`🚀 Fastest PR merged in just ${Math.round(prMergeStats.fastestMergeTimeHours * 60)} minutes!`);
+  } else if (prMergeStats.fastestMergeTimeHours > 0) {
+    funFacts.push(`🚀 Fastest PR merged in ${Math.round(prMergeStats.fastestMergeTimeHours * 10) / 10} hours`);
+  }
+
+  // Fun fact: commit streak
+  if (streakData.longestStreak >= 7) {
+    funFacts.push(`🔥 ${streakData.longestStreak}-day commit streak! Dedication at its finest`);
+  } else if (streakData.longestStreak >= 3) {
+    funFacts.push(`📅 Longest commit streak: ${streakData.longestStreak} consecutive days`);
+  }
+
+  // Fun fact: commits per day average
+  const commitDates = new Set(commits.map(c => c.author.date.split("T")[0]));
+  const activeDays = commitDates.size;
+  if (activeDays > 0) {
+    const avgPerDay = Math.round((commits.length / activeDays) * 10) / 10;
+    funFacts.push(`📊 ${avgPerDay} commits per active day on average`);
+  }
+
+  // Fun fact: weekend warrior or weekday warrior
+  const weekendCommits = activityPattern.dailyDistribution[0] + activityPattern.dailyDistribution[6];
+  const weekdayCommits = activityPattern.dailyDistribution.slice(1, 6).reduce((a, b) => a + b, 0);
+  if (weekendCommits > weekdayCommits * 0.5) {
+    funFacts.push(`🏆 Weekend warrior! ${weekendCommits} weekend commits`);
+  }
+
+  // Fun fact: PR approval rate
+  const approvedPRs = pullRequests.filter(pr => pr.status === "completed").length;
+  const totalPRs = pullRequests.length;
+  if (totalPRs > 0) {
+    const approvalRate = Math.round((approvedPRs / totalPRs) * 100);
+    if (approvalRate >= 90) {
+      funFacts.push(`✅ ${approvalRate}% PR approval rate - quality code!`);
+    }
+  }
+
+  // Fun fact: work item velocity
+  const doneWorkItems = workItems.filter(wi => wi.fields["System.State"] === "Done").length;
+  if (doneWorkItems > 100) {
+    funFacts.push(`💪 ${doneWorkItems} work items completed - unstoppable!`);
+  } else if (doneWorkItems > 50) {
+    funFacts.push(`📈 ${doneWorkItems} work items shipped`);
+  }
+
+  // Fun fact: most common commit hour personality
+  const hourPersonality = getHourPersonality(activityPattern.busiestHour);
+  if (hourPersonality) {
+    funFacts.push(hourPersonality);
+  }
+
+  return funFacts.slice(0, 8);
+}
+
+function getHourPersonality(hour: number): string | null {
+  if (hour >= 9 && hour <= 11) return "☕ Morning coffee coder - most productive 9-11 AM";
+  if (hour >= 14 && hour <= 16) return "🥪 Post-lunch productivity - most commits 2-4 PM";
+  if (hour >= 17 && hour <= 19) return "🌅 Evening enthusiast - peak activity 5-7 PM";
+  if (hour >= 20 && hour <= 23) return "🌙 Moonlight developer - coding into the night";
+  if (hour >= 0 && hour <= 4) return "🦇 Vampire coder - commits in the dead of night";
+  return null;
 }
 
 function generateMilestones(

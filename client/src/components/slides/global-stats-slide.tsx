@@ -3,7 +3,7 @@ import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useAnimatedCounter, formatNumber } from "@/hooks/use-animated-counter";
 import type { ProjectStats } from "@shared/schema";
 import { Card } from "@/components/ui/card";
-import { GitCommit, GitPullRequest, Eye, MessageCircle, Target, Zap } from "lucide-react";
+import { GitCommit, GitPullRequest, Eye, MessageCircle, Target, Zap, FileCode, Clock, Flame, FolderGit } from "lucide-react";
 
 interface GlobalStatsSlideProps {
   stats: ProjectStats;
@@ -67,7 +67,8 @@ function StatCard({ icon, label, value, delay, isVisible, gradient }: StatCardPr
 export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.2 });
 
-  const statCards = [
+  // Filter to show only stats with meaningful values
+  const allStatCards = [
     {
       icon: <GitCommit className="w-6 h-6 text-primary" />,
       label: "Total Commits",
@@ -93,9 +94,35 @@ export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
       gradient: "chart-2",
     },
     {
+      icon: <FileCode className="w-6 h-6 text-chart-4" />,
+      label: "Files Changed",
+      value: stats.totalFilesChanged || 0,
+      gradient: "chart-4",
+    },
+    {
+      icon: <FolderGit className="w-6 h-6 text-primary" />,
+      label: "Repositories",
+      value: stats.totalRepositories || 0,
+      gradient: "primary",
+    },
+    {
+      icon: <Flame className="w-6 h-6 text-accent" />,
+      label: "Longest Streak",
+      value: stats.longestStreak || 0,
+      gradient: "accent",
+      suffix: " days",
+    },
+    {
+      icon: <Clock className="w-6 h-6 text-chart-3" />,
+      label: "Avg PR Merge Time",
+      value: stats.avgPrMergeTimeHours || 0,
+      gradient: "chart-3",
+      suffix: "h",
+    },
+    {
       icon: <Zap className="w-6 h-6 text-chart-4" />,
-      label: "Sprints Completed",
-      value: stats.sprintsCompleted,
+      label: "Work Items",
+      value: stats.totalWorkItems || 0,
       gradient: "chart-4",
     },
     {
@@ -105,6 +132,9 @@ export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
       gradient: "primary",
     },
   ];
+
+  // Only show cards with values > 0
+  const statCards = allStatCards.filter(card => card.value > 0);
 
   return (
     <section
@@ -124,7 +154,8 @@ export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
             The Numbers
           </h2>
           <p className="text-xl text-muted-foreground">
-            Every commit, review, and comment that made {stats.sprintsCompleted} sprints possible
+            {stats.prMergeRate ? `${stats.prMergeRate}% PR merge rate • ` : ''}
+            Every commit, review, and comment that made it happen
           </p>
         </div>
 

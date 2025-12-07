@@ -2,7 +2,7 @@ import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import type { Top5 } from "@shared/schema";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { GitCommit, GitPullRequest, Eye, MessageCircle, Trophy, Medal, Award, Star } from "lucide-react";
+import { GitCommit, GitPullRequest, Eye, MessageCircle, Trophy, Medal, Award, Star, Flame } from "lucide-react";
 
 interface Top5SlideProps {
   top5: Top5;
@@ -185,6 +185,21 @@ export function Top5Slide({ top5 }: Top5SlideProps) {
     },
   ];
 
+  // Add longest streaks if available
+  if (top5.longestStreaks && top5.longestStreaks.length > 0) {
+    rankings.push({
+      title: "Longest Streaks",
+      icon: <Flame className="w-5 h-5 text-chart-4" />,
+      items: top5.longestStreaks.map((e) => ({
+        name: e.name,
+        value: e.commits || 0,
+      })),
+      valueLabel: "days",
+      gradientFrom: "hsl(38 92% 50%)",
+      gradientTo: "hsl(0 84% 60%)",
+    });
+  }
+
   return (
     <section
       ref={ref}
@@ -207,7 +222,7 @@ export function Top5Slide({ top5 }: Top5SlideProps) {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {rankings.map((ranking, index) => (
             <RankingList
               key={ranking.title}

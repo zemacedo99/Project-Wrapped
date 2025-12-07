@@ -319,7 +319,7 @@ export default function ProjectWrapped() {
         dateRange={data.dateRange}
         sprintsCompleted={data.stats.sprintsCompleted}
       />
-      <HighlightsSlide highlights={data.highlights} />
+      <HighlightsSlide highlights={data.highlights} funFacts={data.funFacts} />
       <OutroSlide data={data} />
     </div>
   );
