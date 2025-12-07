@@ -56,12 +56,15 @@ async function fetchAzureDevOps<T>(
   apiVersion: string = "7.0"
 ): Promise<T> {
   // Support both cloud (dev.azure.com) and on-premises Azure DevOps Server
+  // For on-premises: baseUrl is server URL, organization is collection name
+  // For cloud: organization is the Azure DevOps organization name
   const baseUrl = config.baseUrl 
-    ? `${config.baseUrl}/${config.project}/_apis`
+    ? `${config.baseUrl}/${config.organization}/${config.project}/_apis`
     : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
   const url = `${baseUrl}${apiPath}${apiPath.includes("?") ? "&" : "?"}api-version=${apiVersion}`;
 
-  console.log(`[Azure DevOps] Fetching: ${apiPath}`);
+  console.log(`[Azure DevOps] Fetching URL: ${url}`);
+  console.log(`[Azure DevOps] Config - Base URL: ${config.baseUrl || 'cloud'}, Org/Collection: ${config.organization}, Project: ${config.project}`);
 
   const response = await fetch(url, {
     headers: {
@@ -220,7 +223,7 @@ async function fetchWorkItems(
     };
 
     const wiqlBaseUrl = config.baseUrl 
-      ? `${config.baseUrl}/${config.project}/_apis`
+      ? `${config.baseUrl}/${config.organization}/${config.project}/_apis`
       : `https://dev.azure.com/${config.organization}/${config.project}/_apis`;
     
     const queryResult = await fetch(
@@ -532,16 +535,9 @@ export function validateAzureDevOpsConfig(config: Partial<AzureDevOpsConfig>): s
 export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Promise<{ success: boolean; message: string; details?: any }> {
   try {
     console.log(`[Azure DevOps] Testing connection to ${config.organization}/${config.project}...`);
+    console.log(`[Azure DevOps] Base URL: ${config.baseUrl || 'Azure DevOps cloud'}`);
     
-    // Test 1: Fetch project details
-    const projectResponse = await fetchAzureDevOps<{ name: string; description: string }>(
-      config,
-      "/" // Project endpoint
-    );
-    
-    console.log(`[Azure DevOps] Successfully connected to project: ${projectResponse.name}`);
-    
-    // Test 2: Check repository access
+    // Test by fetching repositories (more reliable than project endpoint for on-premises)
     const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
       config,
       "/git/repositories"
@@ -549,11 +545,24 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
     
     console.log(`[Azure DevOps] Found ${reposResponse.value.length} repositories`);
     
+    // If we have repos, connection is successful
+    if (reposResponse.value.length === 0) {
+      return {
+        success: true,
+        message: `Connected to ${config.project}, but no repositories found`,
+        details: {
+          projectName: config.project,
+          repositoryCount: 0,
+          repositories: [],
+        }
+      };
+    }
+    
     return {
       success: true,
       message: `Successfully connected to ${config.project}`,
       details: {
-        projectName: projectResponse.name,
+        projectName: config.project,
         repositoryCount: reposResponse.value.length,
         repositories: reposResponse.value.map(r => r.name),
       }

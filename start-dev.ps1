@@ -95,10 +95,15 @@ Write-Host "Setting environment variables..." -ForegroundColor Yellow
 $env:DATABASE_URL = "postgresql://postgres:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}"
 $env:SESSION_SECRET = "dev-secret-key"
 $env:NODE_ENV = "development"
-$env:AZURE_DEVOPS_PAT = "your-pat-token-here"
+
+# Optional: Set Azure DevOps PAT if you have one (for testing)
+# You can set this in your PowerShell profile or pass it as an environment variable
+# $env:AZURE_DEVOPS_PAT = "your-pat-token-here"
 
 Write-Host "OK: Environment variables set" -ForegroundColor Green
-Write-Host "   Note: Azure DevOps PAT configured from environment" -ForegroundColor Gray
+if ($env:AZURE_DEVOPS_PAT) {
+    Write-Host "   Note: Azure DevOps PAT configured from environment" -ForegroundColor Gray
+}
 
 # Start the development server
 Write-Host ""

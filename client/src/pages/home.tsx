@@ -453,15 +453,15 @@ export default function Home() {
                 data-testid="input-azure-base-url"
               />
               <p className="text-xs text-muted-foreground">
-                For cloud: https://dev.azure.com/<strong>your-org</strong><br />
-                For on-premises: https://<strong>your-server</strong>/<strong>collection</strong>
+                For cloud: leave empty (uses dev.azure.com)<br />
+                For on-premises: https://<strong>your-server</strong> (e.g., https://tfsdavinci.eu.mt.mtnet)
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="azure-org">Organization</Label>
+              <Label htmlFor="azure-org">Organization / Collection</Label>
               <Input
                 id="azure-org"
-                placeholder="your-organization"
+                placeholder="your-organization or Collection Name"
                 value={azureForm.organization}
                 onChange={(e) => {
                   setAzureForm({ ...azureForm, organization: e.target.value });
@@ -471,7 +471,8 @@ export default function Home() {
                 data-testid="input-azure-org"
               />
               <p className="text-xs text-muted-foreground">
-                Collection name for on-premises, organization for cloud
+                For cloud: Your organization name<br />
+                For on-premises: Your collection name (e.g., "LabTec New")
               </p>
             </div>
             <div className="space-y-2">
