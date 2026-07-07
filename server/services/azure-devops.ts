@@ -24,6 +24,7 @@ interface AzureDevOpsCommit {
     Edit: number;
     Delete: number;
   };
+  repoName?: string;
 }
 
 interface AzureDevOpsPullRequest {
@@ -140,45 +141,45 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 
   // Fetch repositories first to get repo-level stats
   const repositories = await fetchRepositories(config);
-  
-  const [commits, pullRequests, workItems, prComments, fileChanges] = await Promise.all([
-    fetchCommits(config, dateFrom, dateTo),
-    fetchPullRequests(config),
+
+  const [commits, pullRequests, workItems] = await Promise.all([
+    fetchCommits(config, repositories, dateFrom, dateTo),
+    fetchPullRequests(config, repositories),
     fetchWorkItems(config, dateFrom, dateTo),
-    fetchPullRequestComments(config),
-    fetchCommitChanges(config, dateFrom, dateTo),
   ]);
 
-  console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items, ${prComments} PR comments`);
+  console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items`);
 
   // Calculate enhanced stats
   const prMergeStats = calculatePrMergeStats(pullRequests);
   const activityPattern = calculateActivityPattern(commits);
   const streakData = calculateStreaks(commits);
-  const codeChanges = aggregateCodeChanges(fileChanges);
   const repoStats = aggregateRepositoryStats(commits, pullRequests, repositories);
   const workItemBreakdown = aggregateWorkItemTypes(workItems);
 
   const contributorStats = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData);
   const moduleStats = aggregateModuleStats(workItems);
   const top5 = calculateTop5(contributorStats, commits, streakData);
-  const highlights = generateHighlights(commits, pullRequests, workItems, prComments, codeChanges, activityPattern);
+  const highlights = generateHighlights(commits, pullRequests, workItems, activityPattern);
   const funFacts = generateFunFacts(commits, pullRequests, workItems, activityPattern, prMergeStats, streakData);
   const milestones = generateMilestones(commits, pullRequests, workItems, dateFrom, dateTo);
 
+  // A "review" = a reviewer who actually cast a vote (approve/reject/waiting), not just an assigned reviewer.
+  const totalReviews = pullRequests.reduce(
+    (acc, pr) => acc + (pr.reviewers?.filter(r => r.vote !== 0).length || 0),
+    0
+  );
   const mergedPrs = pullRequests.filter(pr => pr.status === "completed").length;
   const totalStats = {
     totalCommits: commits.length,
     totalPullRequests: pullRequests.length,
-    totalReviews: pullRequests.reduce((acc, pr) => acc + (pr.reviewers?.length || 0), 0),
-    totalComments: prComments,
+    totalReviews,
+    // Per-PR comment threads cannot be scanned at project scale (thousands of PRs) without
+    // timing out, so we do not report a comment count rather than showing a misleading partial number.
+    totalComments: 0,
     totalBugsFixed: workItems.filter(wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done").length,
     totalStoryPointsDone: workItems.reduce((acc, wi) => acc + (wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0), 0),
     sprintsCompleted: dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0,
-    // Enhanced stats
-    totalLinesAdded: codeChanges.linesAdded,
-    totalLinesDeleted: codeChanges.linesDeleted,
-    totalFilesChanged: codeChanges.filesChanged,
     totalRepositories: repositories.length,
     avgPrMergeTimeHours: prMergeStats.avgMergeTimeHours,
     fastestPrMergeTimeHours: prMergeStats.fastestMergeTimeHours,
@@ -189,12 +190,32 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 
   console.log(`[Azure DevOps] Aggregated ${contributorStats.length} contributors, ${moduleStats.length} modules`);
 
+  // For a full-project recap (no explicit date range), derive the range from the
+  // actual commit history so the wrap reflects the entire project lifetime.
+  // NOTE: iterate instead of spreading into Math.min/Math.max — the commit array can hold
+  // tens of thousands of entries and spreading it as function args overflows the call stack.
+  let minCommitTs = Infinity;
+  let maxCommitTs = -Infinity;
+  for (const c of commits) {
+    const t = new Date(c.author.date).getTime();
+    if (Number.isNaN(t)) continue;
+    if (t < minCommitTs) minCommitTs = t;
+    if (t > maxCommitTs) maxCommitTs = t;
+  }
+  const hasCommitDates = minCommitTs !== Infinity;
+  const derivedStart = hasCommitDates
+    ? new Date(minCommitTs).toISOString().split("T")[0]
+    : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const derivedEnd = hasCommitDates
+    ? new Date(maxCommitTs).toISOString().split("T")[0]
+    : new Date().toISOString().split("T")[0];
+
   return {
     projectName: config.project,
-    version: "1.0",
+    version: "",
     dateRange: {
-      start: dateFrom || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      end: dateTo || new Date().toISOString().split("T")[0],
+      start: dateFrom || derivedStart,
+      end: dateTo || derivedEnd,
     },
     stats: totalStats,
     contributors: contributorStats,
@@ -231,17 +252,21 @@ function calculatePrMergeStats(pullRequests: AzureDevOpsPullRequest[]): {
   mergeTimeByAuthor: Map<string, number[]>;
 } {
   const mergeTimeByAuthor = new Map<string, number[]>();
-  const mergeTimes: number[] = [];
+  let mergeCount = 0;
+  let mergeSum = 0;
+  let fastestMerge = Infinity;
 
   for (const pr of pullRequests) {
     if (pr.status === "completed" && pr.closedDate && pr.creationDate) {
       const created = new Date(pr.creationDate).getTime();
       const closed = new Date(pr.closedDate).getTime();
       const hoursToMerge = (closed - created) / (1000 * 60 * 60);
-      
+
       if (hoursToMerge > 0 && hoursToMerge < 8760) { // Less than 1 year
-        mergeTimes.push(hoursToMerge);
-        
+        mergeCount++;
+        mergeSum += hoursToMerge;
+        if (hoursToMerge < fastestMerge) fastestMerge = hoursToMerge;
+
         const author = pr.createdBy.displayName;
         if (!mergeTimeByAuthor.has(author)) {
           mergeTimeByAuthor.set(author, []);
@@ -252,8 +277,8 @@ function calculatePrMergeStats(pullRequests: AzureDevOpsPullRequest[]): {
   }
 
   return {
-    avgMergeTimeHours: mergeTimes.length > 0 ? Math.round(mergeTimes.reduce((a, b) => a + b, 0) / mergeTimes.length) : 0,
-    fastestMergeTimeHours: mergeTimes.length > 0 ? Math.round(Math.min(...mergeTimes) * 10) / 10 : 0,
+    avgMergeTimeHours: mergeCount > 0 ? Math.round(mergeSum / mergeCount) : 0,
+    fastestMergeTimeHours: mergeCount > 0 ? Math.round(fastestMerge * 10) / 10 : 0,
     mergeTimeByAuthor,
   };
 }
@@ -338,42 +363,17 @@ function calculateStreaks(commits: AzureDevOpsCommit[]): {
   return { longestStreak, streaksByAuthor };
 }
 
-// Aggregate code changes from file changes
-function aggregateCodeChanges(fileChanges: any[]): {
-  linesAdded: number;
-  linesDeleted: number;
-  filesChanged: number;
-} {
-  let linesAdded = 0;
-  let linesDeleted = 0;
-  const filesChanged = new Set<string>();
-
-  for (const change of fileChanges) {
-    if (change.item?.path) {
-      filesChanged.add(change.item.path);
-    }
-    // Azure DevOps change types: add, edit, delete
-    if (change.changeType === "add" || change.changeType === "edit") {
-      linesAdded += change.item?.contentLength || 0;
-    }
-  }
-
-  return {
-    linesAdded,
-    linesDeleted,
-    filesChanged: filesChanged.size,
-  };
-}
-
-// Aggregate repository-level stats
+// Aggregate repository-level stats from commits and PRs tagged with their repo name.
 function aggregateRepositoryStats(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   repositories: Array<{ id: string; name: string }>
 ): RepositoryStats[] {
   const repoStats = new Map<string, RepositoryStats>();
+  const contributorsByRepo = new Map<string, Set<string>>();
+  const commitsByRepo = new Map<string, number>();
 
-  // Initialize from repositories list
+  // Initialize from the repositories list so empty repos still appear.
   for (const repo of repositories) {
     repoStats.set(repo.name, {
       name: repo.name,
@@ -381,30 +381,47 @@ function aggregateRepositoryStats(
       pullRequests: 0,
       contributors: 0,
     });
+    contributorsByRepo.set(repo.name, new Set());
   }
 
-  // Count commits per repo (we need to track this during fetch)
-  const contributorsByRepo = new Map<string, Set<string>>();
-
+  // Count commits and unique contributors per repo.
   for (const commit of commits) {
-    // Track unique contributors
-    const author = commit.author.name;
-    Array.from(repoStats.keys()).forEach(repoName => {
-      if (!contributorsByRepo.has(repoName)) {
-        contributorsByRepo.set(repoName, new Set());
-      }
-    });
+    const repoName = commit.repoName;
+    if (!repoName) continue;
+    commitsByRepo.set(repoName, (commitsByRepo.get(repoName) || 0) + 1);
+    if (!contributorsByRepo.has(repoName)) contributorsByRepo.set(repoName, new Set());
+    contributorsByRepo.get(repoName)!.add(commit.author.name);
   }
 
-  // Update contributor counts
-  Array.from(contributorsByRepo.entries()).forEach(([repoName, contributors]) => {
-    const stats = repoStats.get(repoName);
-    if (stats) {
-      stats.contributors = contributors.size;
+  // Count PRs per repo.
+  const prsByRepo = new Map<string, number>();
+  const topContributorByRepo = new Map<string, Map<string, number>>();
+  for (const commit of commits) {
+    const repoName = commit.repoName;
+    if (!repoName) continue;
+    if (!topContributorByRepo.has(repoName)) topContributorByRepo.set(repoName, new Map());
+    const counts = topContributorByRepo.get(repoName)!;
+    counts.set(commit.author.name, (counts.get(commit.author.name) || 0) + 1);
+  }
+  for (const pr of pullRequests) {
+    const repoName = pr.repository?.name;
+    if (!repoName) continue;
+    prsByRepo.set(repoName, (prsByRepo.get(repoName) || 0) + 1);
+  }
+
+  for (const [name, stats] of Array.from(repoStats.entries())) {
+    stats.commits = commitsByRepo.get(name) || 0;
+    stats.pullRequests = prsByRepo.get(name) || 0;
+    stats.contributors = contributorsByRepo.get(name)?.size || 0;
+
+    const counts = topContributorByRepo.get(name);
+    if (counts && counts.size > 0) {
+      stats.topContributor = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0];
     }
-  });
+  }
 
   return Array.from(repoStats.values())
+    .filter(r => r.commits > 0 || r.pullRequests > 0)
     .sort((a, b) => b.commits - a.commits)
     .slice(0, 10);
 }
@@ -423,41 +440,49 @@ function aggregateWorkItemTypes(workItems: AzureDevOpsWorkItem[]): Record<string
 
 async function fetchCommits(
   config: AzureDevOpsConfig,
+  repositories: Array<{ id: string; name: string }>,
   dateFrom?: string,
   dateTo?: string
 ): Promise<AzureDevOpsCommit[]> {
   try {
-    console.log(`[Azure DevOps] Fetching repositories...`);
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-
-    console.log(`[Azure DevOps] Found ${reposResponse.value.length} repositories`);
+    console.log(`[Azure DevOps] Fetching commits from ${repositories.length} repositories...`);
     const allCommits: AzureDevOpsCommit[] = [];
+    const pageSize = 1000;
 
-    // Fetch from all repositories (up to 10)
-    const reposToFetch = reposResponse.value.slice(0, 10);
-    
-    for (const repo of reposToFetch) {
+    for (const repo of repositories) {
       try {
-        console.log(`[Azure DevOps] Fetching commits from repository: ${repo.name}`);
-        // Build query string - only add date filters if provided
-        let queryString = "$top=1000";
-        if (dateFrom) queryString += `&searchCriteria.fromDate=${dateFrom}`;
-        if (dateTo) queryString += `&searchCriteria.toDate=${dateTo}`;
-        
-        const commitsResponse = await fetchAzureDevOps<{ value: AzureDevOpsCommit[] }>(
-          config,
-          `/git/repositories/${repo.id}/commits?${queryString}`
-        );
-        console.log(`[Azure DevOps] Found ${commitsResponse.value.length} commits in ${repo.name}`);
-        allCommits.push(...commitsResponse.value);
+        let skip = 0;
+        let repoCommitCount = 0;
+
+        // Page through every commit in the repo using $skip until a short page is returned.
+        while (true) {
+          let queryString = `searchCriteria.$top=${pageSize}&searchCriteria.$skip=${skip}`;
+          if (dateFrom) queryString += `&searchCriteria.fromDate=${dateFrom}`;
+          if (dateTo) queryString += `&searchCriteria.toDate=${dateTo}`;
+
+          const commitsResponse = await fetchAzureDevOps<{ value: AzureDevOpsCommit[] }>(
+            config,
+            `/git/repositories/${repo.id}/commits?${queryString}`
+          );
+
+          const page = commitsResponse.value || [];
+          for (const commit of page) {
+            commit.repoName = repo.name;
+          }
+          allCommits.push(...page);
+          repoCommitCount += page.length;
+
+          if (page.length < pageSize) break;
+          skip += pageSize;
+        }
+
+        console.log(`[Azure DevOps] ${repo.name}: ${repoCommitCount} commits`);
       } catch (error) {
         console.warn(`[Azure DevOps] Failed to fetch commits for repo ${repo.name}:`, error);
       }
     }
 
+    console.log(`[Azure DevOps] Total commits fetched: ${allCommits.length}`);
     return allCommits;
   } catch (error) {
     console.error("[Azure DevOps] Failed to fetch commits:", error);
@@ -465,131 +490,50 @@ async function fetchCommits(
   }
 }
 
-async function fetchPullRequests(config: AzureDevOpsConfig): Promise<AzureDevOpsPullRequest[]> {
+async function fetchPullRequests(
+  config: AzureDevOpsConfig,
+  repositories: Array<{ id: string; name: string }>
+): Promise<AzureDevOpsPullRequest[]> {
   try {
-    console.log(`[Azure DevOps] Fetching repositories for PRs...`);
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-
+    console.log(`[Azure DevOps] Fetching pull requests from ${repositories.length} repositories...`);
     const allPRs: AzureDevOpsPullRequest[] = [];
-    const reposToFetch = reposResponse.value.slice(0, 10);
+    const pageSize = 1000;
 
-    for (const repo of reposToFetch) {
+    for (const repo of repositories) {
       try {
-        console.log(`[Azure DevOps] Fetching PRs from repository: ${repo.name}`);
-        const prsResponse = await fetchAzureDevOps<{ value: AzureDevOpsPullRequest[] }>(
-          config,
-          `/git/repositories/${repo.id}/pullrequests?searchCriteria.status=all&$top=500`
-        );
-        console.log(`[Azure DevOps] Found ${prsResponse.value.length} PRs in ${repo.name}`);
-        allPRs.push(...prsResponse.value);
+        let skip = 0;
+        let repoPrCount = 0;
+
+        // Page through every PR (any status) in the repo using $skip.
+        while (true) {
+          const prsResponse = await fetchAzureDevOps<{ value: AzureDevOpsPullRequest[] }>(
+            config,
+            `/git/repositories/${repo.id}/pullrequests?searchCriteria.status=all&$top=${pageSize}&$skip=${skip}`
+          );
+
+          const page = prsResponse.value || [];
+          for (const pr of page) {
+            // The per-repo PR list omits the repository object, so attach it for repo-level stats.
+            pr.repository = pr.repository || { id: repo.id, name: repo.name };
+          }
+          allPRs.push(...page);
+          repoPrCount += page.length;
+
+          if (page.length < pageSize) break;
+          skip += pageSize;
+        }
+
+        console.log(`[Azure DevOps] ${repo.name}: ${repoPrCount} pull requests`);
       } catch (error) {
         console.warn(`[Azure DevOps] Failed to fetch PRs for repo ${repo.name}:`, error);
       }
     }
 
+    console.log(`[Azure DevOps] Total pull requests fetched: ${allPRs.length}`);
     return allPRs;
   } catch (error) {
     console.error("[Azure DevOps] Failed to fetch pull requests:", error);
     throw error;
-  }
-}
-
-async function fetchPullRequestComments(config: AzureDevOpsConfig): Promise<number> {
-  try {
-    console.log(`[Azure DevOps] Fetching PR comments...`);
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-
-    let totalComments = 0;
-    const reposToFetch = reposResponse.value.slice(0, 10);
-
-    for (const repo of reposToFetch) {
-      try {
-        const prsResponse = await fetchAzureDevOps<{ value: AzureDevOpsPullRequest[] }>(
-          config,
-          `/git/repositories/${repo.id}/pullrequests?searchCriteria.status=all&$top=500`
-        );
-
-        for (const pr of prsResponse.value || []) {
-          try {
-            const threadsResponse = await fetchAzureDevOps<{ value: Array<{ comments: Array<any> }> }>(
-              config,
-              `/git/repositories/${repo.id}/pullrequests/${pr.pullRequestId}/threads`
-            );
-            
-            for (const thread of threadsResponse.value || []) {
-              totalComments += thread.comments?.length || 0;
-            }
-          } catch (error) {
-            // Continue if threads fail for a specific PR
-          }
-        }
-      } catch (error) {
-        console.warn(`[Azure DevOps] Failed to fetch PR comments for repo ${repo.name}:`, error);
-      }
-    }
-
-    console.log(`[Azure DevOps] Found ${totalComments} PR comments`);
-    return totalComments;
-  } catch (error) {
-    console.warn("[Azure DevOps] Failed to fetch PR comments:", error);
-    return 0; // Return 0 if this fails, don't break the whole process
-  }
-}
-
-async function fetchCommitChanges(
-  config: AzureDevOpsConfig,
-  dateFrom?: string,
-  dateTo?: string
-): Promise<any[]> {
-  try {
-    console.log(`[Azure DevOps] Fetching commit file changes...`);
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-
-    const changes: any[] = [];
-    const reposToFetch = reposResponse.value.slice(0, 5); // Limit to 5 repos to avoid too many API calls
-
-    for (const repo of reposToFetch) {
-      try {
-        let queryString = "$top=100";
-        if (dateFrom) queryString += `&searchCriteria.fromDate=${dateFrom}`;
-        if (dateTo) queryString += `&searchCriteria.toDate=${dateTo}`;
-
-        const commitsResponse = await fetchAzureDevOps<{ value: AzureDevOpsCommit[] }>(
-          config,
-          `/git/repositories/${repo.id}/commits?${queryString}`
-        );
-
-        // For each commit, fetch its changes
-        for (const commit of commitsResponse.value || []) {
-          try {
-            const changesResponse = await fetchAzureDevOps<{ value: any[] }>(
-              config,
-              `/git/repositories/${repo.id}/commits/${commit.commitId}/changes`
-            );
-            changes.push(...(changesResponse.value || []));
-          } catch (error) {
-            // Continue if changes fail for a specific commit
-          }
-        }
-      } catch (error) {
-        console.warn(`[Azure DevOps] Failed to fetch changes for repo ${repo.name}:`, error);
-      }
-    }
-
-    console.log(`[Azure DevOps] Found ${changes.length} file changes`);
-    return changes;
-  } catch (error) {
-    console.warn("[Azure DevOps] Failed to fetch commit changes:", error);
-    return []; // Return empty array if this fails
   }
 }
 
@@ -598,29 +542,59 @@ async function fetchWorkItems(
   dateFrom?: string,
   dateTo?: string
 ): Promise<AzureDevOpsWorkItem[]> {
+  // A single WIQL query returns at most 20,000 rows. To retrieve every work item in a large
+  // project we page by an ascending [System.Id] watermark, asking for the next chunk of IDs
+  // greater than the highest ID we've seen so far, until a short page signals the end.
+  const WIQL_MAX = 20000;
+  // Only request the fields the wrap actually uses (much lighter/faster than $expand=all).
+  const detailFields = [
+    "System.Id",
+    "System.Title",
+    "System.WorkItemType",
+    "System.State",
+    "System.AssignedTo",
+    "Microsoft.VSTS.Scheduling.StoryPoints",
+    "System.CreatedDate",
+    "System.AreaPath",
+  ].join(",");
+
+  // Escape single quotes for safe WIQL string literals.
+  const projectLiteral = config.project.replace(/'/g, "''");
+
   try {
-    console.log(`[Azure DevOps] Querying work items...`);
-    // Build WHERE clause - only add date filters if provided
-    let whereClause = `[System.TeamProject] = '${config.project}'`;
+    console.log(`[Azure DevOps] Querying work item IDs (paging by ID watermark)...`);
+
+    const baseFilters = [`[System.TeamProject] = '${projectLiteral}'`];
     if (dateFrom && dateTo) {
-      whereClause += ` AND [System.CreatedDate] >= '${dateFrom}' AND [System.CreatedDate] <= '${dateTo}'`;
+      baseFilters.push(`[System.CreatedDate] >= '${dateFrom}'`);
+      baseFilters.push(`[System.CreatedDate] <= '${dateTo}'`);
     }
-    
-    const wiqlQuery = {
-      query: `SELECT [System.Id] FROM workitems WHERE ${whereClause} ORDER BY [System.ChangedDate] DESC`,
-    };
 
-    // Use the main API helper with POST method for WIQL query
-    const queryData = await fetchAzureDevOps<{ workItems: Array<{ id: number }> }>(
-      config,
-      `/wit/wiql`,
-      "7.0",
-      "POST",
-      JSON.stringify(wiqlQuery)
-    );
+    const allWorkItemIds: number[] = [];
+    let lastId = 0;
+    while (true) {
+      const whereClause = [...baseFilters, `[System.Id] > ${lastId}`].join(" AND ");
+      const wiqlQuery = {
+        query: `SELECT [System.Id] FROM workitems WHERE ${whereClause} ORDER BY [System.Id] ASC`,
+      };
 
-    // Get ALL work item IDs from the query (WIQL returns all results, but we'll process in batches)
-    const allWorkItemIds = queryData.workItems?.map((wi: { id: number }) => wi.id) || [];
+      const queryData = await fetchAzureDevOps<{ workItems: Array<{ id: number }> }>(
+        config,
+        `/wit/wiql`,
+        "7.0",
+        "POST",
+        JSON.stringify(wiqlQuery)
+      );
+
+      const ids = queryData.workItems?.map(wi => wi.id) || [];
+      if (ids.length === 0) break;
+
+      for (const id of ids) allWorkItemIds.push(id); // avoid spread on a 20k array (stack safety)
+      lastId = ids[ids.length - 1];
+      console.log(`[Azure DevOps] Collected ${allWorkItemIds.length} work item IDs so far (up to id ${lastId})`);
+
+      if (ids.length < WIQL_MAX) break;
+    }
 
     console.log(`[Azure DevOps] Found ${allWorkItemIds.length} work items total`);
 
@@ -628,28 +602,39 @@ async function fetchWorkItems(
       return [];
     }
 
-    // Process in batches of 200 (Azure DevOps API limit)
+    // Build batches of 200 IDs (Azure DevOps limit for the batch GET).
     const batchSize = 200;
-    const workItems: AzureDevOpsWorkItem[] = [];
-    const totalBatches = Math.ceil(allWorkItemIds.length / batchSize);
-
+    const batches: number[][] = [];
     for (let i = 0; i < allWorkItemIds.length; i += batchSize) {
-      const batch = allWorkItemIds.slice(i, i + batchSize);
-      const batchNumber = Math.floor(i / batchSize) + 1;
-      console.log(`[Azure DevOps] Fetching work item details batch ${batchNumber}/${totalBatches} (${batch.length} items)`);
-      
-      try {
-        const detailsData = await fetchAzureDevOps<{ value: AzureDevOpsWorkItem[] }>(
-          config,
-          `/wit/workitems?ids=${batch.join(",")}&$expand=all`
-        );
+      batches.push(allWorkItemIds.slice(i, i + batchSize));
+    }
 
-        workItems.push(...(detailsData.value || []));
-        console.log(`[Azure DevOps] Batch ${batchNumber}: Retrieved ${(detailsData.value || []).length} items`);
-      } catch (batchError) {
-        console.warn(`[Azure DevOps] Error fetching batch ${batchNumber}, continuing with other batches...`);
-        // Continue with next batch even if one fails
+    console.log(`[Azure DevOps] Fetching details for ${allWorkItemIds.length} work items in ${batches.length} batches...`);
+
+    // Fetch batches with limited concurrency to keep it reasonably fast without hammering the server.
+    const concurrency = 5;
+    const workItems: AzureDevOpsWorkItem[] = [];
+    for (let i = 0; i < batches.length; i += concurrency) {
+      const slice = batches.slice(i, i + concurrency);
+      const results = await Promise.all(
+        slice.map(async (batch, idx) => {
+          const batchNumber = i + idx + 1;
+          try {
+            const detailsData = await fetchAzureDevOps<{ value: AzureDevOpsWorkItem[] }>(
+              config,
+              `/wit/workitems?ids=${batch.join(",")}&fields=${detailFields}`
+            );
+            return detailsData.value || [];
+          } catch {
+            console.warn(`[Azure DevOps] Error fetching work item batch ${batchNumber}, skipping it`);
+            return [] as AzureDevOpsWorkItem[];
+          }
+        })
+      );
+      for (const list of results) {
+        for (const wi of list) workItems.push(wi);
       }
+      console.log(`[Azure DevOps] Work item details progress: ${workItems.length}/${allWorkItemIds.length}`);
     }
 
     console.log(`[Azure DevOps] Fetched details for ${workItems.length} work items out of ${allWorkItemIds.length}`);
@@ -720,6 +705,9 @@ function aggregateContributorStats(
     contributorMap.get(name)!.pullRequestsOpened++;
 
     for (const reviewer of pr.reviewers || []) {
+      // Only count reviewers who actually cast a vote (approve/reject/waiting), matching the
+      // project-level "reviews" metric. Assigned-but-inactive reviewers are ignored.
+      if (reviewer.vote === 0) continue;
       if (!contributorMap.has(reviewer.displayName)) {
         contributorMap.set(reviewer.displayName, {
           name: reviewer.displayName,
@@ -774,8 +762,20 @@ function aggregateContributorStats(
     .slice(0, 10);
 }
 
+// Modules are derived from work item Area Paths. We can only attribute work items
+// (not commits or PRs) to an area path, so we report work items, story points, bugs
+// and contributors — the metrics that are actually available at this granularity.
 function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
-  const moduleMap = new Map<string, Module>();
+  interface ModuleAcc {
+    name: string;
+    workItems: number;
+    storyPointsDone: number;
+    bugsFixed: number;
+    contributors: Set<string>;
+    doneCount: number;
+  }
+
+  const moduleMap = new Map<string, ModuleAcc>();
 
   for (const wi of workItems) {
     const areaPath = wi.fields["System.AreaPath"] || "General";
@@ -784,21 +784,47 @@ function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
     if (!moduleMap.has(moduleName)) {
       moduleMap.set(moduleName, {
         name: moduleName,
-        commits: 0,
-        pullRequests: 0,
+        workItems: 0,
         storyPointsDone: 0,
-        status: "In Progress",
+        bugsFixed: 0,
+        contributors: new Set(),
+        doneCount: 0,
       });
     }
 
-    const module = moduleMap.get(moduleName)!;
-    module.storyPointsDone += wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0;
-    module.pullRequests++;
+    const acc = moduleMap.get(moduleName)!;
+    acc.workItems++;
+    acc.storyPointsDone += wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0;
+
+    const state = wi.fields["System.State"];
+    if (state === "Done" || state === "Closed" || state === "Resolved") {
+      acc.doneCount++;
+    }
+    if (wi.fields["System.WorkItemType"] === "Bug" && state === "Done") {
+      acc.bugsFixed++;
+    }
+    const assignee = wi.fields["System.AssignedTo"]?.displayName;
+    if (assignee) acc.contributors.add(assignee);
   }
 
   return Array.from(moduleMap.values())
-    .sort((a, b) => b.storyPointsDone - a.storyPointsDone)
-    .slice(0, 6);
+    .sort((a, b) => b.workItems - a.workItems)
+    .slice(0, 6)
+    .map((acc): Module => {
+      const completionRate = acc.workItems > 0 ? acc.doneCount / acc.workItems : 0;
+      const status = completionRate >= 0.99 ? "Complete" : completionRate > 0 ? "In Progress" : "Planned";
+      return {
+        name: acc.name,
+        // commits/pullRequests cannot be attributed to an area path; report 0 (hidden in the UI).
+        commits: 0,
+        pullRequests: 0,
+        storyPointsDone: acc.storyPointsDone,
+        status,
+        bugsFixed: acc.bugsFixed,
+        contributors: acc.contributors.size,
+        workItems: acc.workItems,
+      };
+    });
 }
 
 function calculateTop5(
@@ -849,8 +875,6 @@ function generateHighlights(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   workItems: AzureDevOpsWorkItem[],
-  prComments: number = 0,
-  codeChanges: { linesAdded: number; linesDeleted: number; filesChanged: number },
   activityPattern: ActivityPattern
 ): string[] {
   const highlights: string[] = [];
@@ -861,17 +885,7 @@ function generateHighlights(
 
   if (pullRequests.length > 0) {
     const mergedPRs = pullRequests.filter(pr => pr.status === "completed").length;
-    highlights.push(`${mergedPRs} pull requests merged`);
-  }
-
-  if (prComments > 0) {
-    highlights.push(`${prComments.toLocaleString()} code review comments`);
-  }
-
-  // Enhanced: Lines of code
-  if (codeChanges.linesAdded > 0 || codeChanges.linesDeleted > 0) {
-    const netLines = codeChanges.linesAdded - codeChanges.linesDeleted;
-    highlights.push(`${codeChanges.filesChanged.toLocaleString()} files modified`);
+    highlights.push(`${mergedPRs.toLocaleString()} pull requests merged`);
   }
 
   // Count work items by type
@@ -1035,56 +1049,70 @@ function generateMilestones(
 ): Milestone[] {
   const milestones: Milestone[] = [];
 
-  if (dateFrom) {
+  const sortedCommits = commits.length > 0
+    ? [...commits].sort((a, b) => new Date(a.author.date).getTime() - new Date(b.author.date).getTime())
+    : [];
+
+  if (sortedCommits.length > 0) {
+    const firstCommit = sortedCommits[0];
     milestones.push({
-      date: dateFrom,
-      title: "Period Start",
-      description: "Beginning of the tracking period",
+      date: firstCommit.author.date.split("T")[0],
+      title: "First Commit",
+      description: firstCommit.comment?.split("\n")[0]?.substring(0, 60) || "Project kicked off",
       icon: "rocket",
     });
+
+    // Busiest month by commit volume — a real, data-driven milestone.
+    const commitsByMonth = new Map<string, number>();
+    for (const c of sortedCommits) {
+      const month = c.author.date.substring(0, 7); // YYYY-MM
+      commitsByMonth.set(month, (commitsByMonth.get(month) || 0) + 1);
+    }
+    const busiest = Array.from(commitsByMonth.entries()).sort((a, b) => b[1] - a[1])[0];
+    if (busiest) {
+      const monthLabel = new Date(`${busiest[0]}-01T00:00:00`).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+      milestones.push({
+        date: `${busiest[0]}-15`,
+        title: "Busiest Month",
+        description: `${monthLabel} — ${busiest[1].toLocaleString()} commits`,
+        icon: "flame",
+      });
+    }
   }
 
-  if (commits.length > 0) {
-    const sortedCommits = [...commits].sort(
-      (a, b) => new Date(a.author.date).getTime() - new Date(b.author.date).getTime()
-    );
-    const firstCommitDate = sortedCommits[0].author.date.split("T")[0];
+  // First and most recent merged PR.
+  const mergedPrs = pullRequests
+    .filter(pr => pr.status === "completed" && pr.closedDate)
+    .sort((a, b) => new Date(a.closedDate!).getTime() - new Date(b.closedDate!).getTime());
+  if (mergedPrs.length > 0) {
     milestones.push({
-      date: firstCommitDate,
-      title: "First Commit",
-      description: sortedCommits[0].comment?.substring(0, 50) || "Initial commit",
-      icon: "lightbulb",
-    });
-
-    const midIndex = Math.floor(sortedCommits.length / 2);
-    const midDate = sortedCommits[midIndex].author.date.split("T")[0];
-    milestones.push({
-      date: midDate,
-      title: "Halfway Point",
-      description: `${midIndex} commits so far`,
+      date: mergedPrs[0].closedDate!.split("T")[0],
+      title: "First PR Merged",
+      description: mergedPrs[0].title?.substring(0, 60) || "First contribution merged",
       icon: "flag",
     });
   }
 
-  if (pullRequests.length >= 100 && dateTo) {
+  if (sortedCommits.length > 0) {
+    const lastCommit = sortedCommits[sortedCommits.length - 1];
     milestones.push({
-      date: dateTo,
-      title: "100 PRs Milestone",
-      description: "Team collaboration at scale",
-      icon: "party",
-    });
-  }
-
-  if (dateTo) {
-    milestones.push({
-      date: dateTo,
-      title: "Period End",
-      description: "End of tracking period",
+      date: lastCommit.author.date.split("T")[0],
+      title: "Latest Commit",
+      description: lastCommit.comment?.split("\n")[0]?.substring(0, 60) || "The journey continues",
       icon: "lock",
     });
   }
 
-  return milestones.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  // De-duplicate by date+title and order chronologically.
+  const seen = new Set<string>();
+  return milestones
+    .filter(m => {
+      const key = `${m.date}|${m.title}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }
 
 export function validateAzureDevOpsConfig(config: Partial<AzureDevOpsConfig>): string[] {

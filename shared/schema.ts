@@ -40,6 +40,7 @@ export const moduleSchema = z.object({
   status: z.string(),
   bugsFixed: z.number().optional(),
   contributors: z.number().optional(),
+  workItems: z.number().optional(),
 });
 
 export const repositoryStatsSchema = z.object({

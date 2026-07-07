@@ -200,6 +200,9 @@ export function Top5Slide({ top5 }: Top5SlideProps) {
     });
   }
 
+  // Only show leaderboards that actually have data (e.g. hide Comments when it can't be computed).
+  const visibleRankings = rankings.filter((r) => r.items.some((i) => i.value > 0));
+
   return (
     <section
       ref={ref}
@@ -223,7 +226,7 @@ export function Top5Slide({ top5 }: Top5SlideProps) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {rankings.map((ranking, index) => (
+          {visibleRankings.map((ranking, index) => (
             <RankingList
               key={ranking.title}
               title={ranking.title}

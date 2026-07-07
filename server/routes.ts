@@ -110,9 +110,8 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Error connecting to Azure DevOps:", error);
-      res.status(500).json({ 
-        error: error instanceof Error ? error.message : "Failed to connect to Azure DevOps" 
-      });
+      const message = error instanceof Error && error.message ? error.message : "Failed to connect to Azure DevOps";
+      res.status(500).json({ error: message });
     }
   });
 
@@ -140,10 +139,8 @@ export async function registerRoutes(
       }
     } catch (error) {
       console.error("Error testing Azure DevOps connection:", error);
-      res.status(500).json({ 
-        success: false,
-        error: error instanceof Error ? error.message : "Connection test failed" 
-      });
+      const message = error instanceof Error && error.message ? error.message : "Connection test failed";
+      res.status(500).json({ success: false, error: message });
     }
   });
 
@@ -172,9 +169,8 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Error connecting to GitHub:", error);
-      res.status(500).json({ 
-        error: error instanceof Error ? error.message : "Failed to connect to GitHub" 
-      });
+      const message = error instanceof Error && error.message ? error.message : "Failed to connect to GitHub";
+      res.status(500).json({ error: message });
     }
   });
 

@@ -2,7 +2,7 @@ import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import type { Module } from "@shared/schema";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Layers, GitCommit, GitPullRequest, Target, Flame, CheckCircle, AlertCircle, Clock } from "lucide-react";
+import { Layers, Target, Flame, CheckCircle, AlertCircle, Clock, Bug, ClipboardList, Users } from "lucide-react";
 
 interface ModulesSlideProps {
   modules: Module[];
@@ -37,8 +37,8 @@ function getStatusConfig(status: string) {
 function findMostActiveModule(modules: Module[]): Module | undefined {
   if (modules.length === 0) return undefined;
   return modules.reduce((prev, current) => {
-    const prevActivity = prev.commits + prev.pullRequests + prev.storyPointsDone;
-    const currentActivity = current.commits + current.pullRequests + current.storyPointsDone;
+    const prevActivity = (prev.workItems || 0) + prev.storyPointsDone;
+    const currentActivity = (current.workItems || 0) + current.storyPointsDone;
     return currentActivity > prevActivity ? current : prev;
   });
 }
@@ -87,17 +87,10 @@ function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps)
       <div className="grid grid-cols-3 gap-4">
         <div className="text-center p-3 rounded-lg bg-white/5">
           <div className="flex items-center justify-center mb-1">
-            <GitCommit className="w-4 h-4 text-primary" />
+            <ClipboardList className="w-4 h-4 text-primary" />
           </div>
-          <p className="text-2xl font-bold tabular-nums">{module.commits.toLocaleString()}</p>
-          <p className="text-xs text-muted-foreground">Commits</p>
-        </div>
-        <div className="text-center p-3 rounded-lg bg-white/5">
-          <div className="flex items-center justify-center mb-1">
-            <GitPullRequest className="w-4 h-4 text-accent" />
-          </div>
-          <p className="text-2xl font-bold tabular-nums">{module.pullRequests.toLocaleString()}</p>
-          <p className="text-xs text-muted-foreground">PRs</p>
+          <p className="text-2xl font-bold tabular-nums">{(module.workItems || 0).toLocaleString()}</p>
+          <p className="text-xs text-muted-foreground">Work Items</p>
         </div>
         <div className="text-center p-3 rounded-lg bg-white/5">
           <div className="flex items-center justify-center mb-1">
@@ -105,6 +98,26 @@ function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps)
           </div>
           <p className="text-2xl font-bold tabular-nums">{module.storyPointsDone.toLocaleString()}</p>
           <p className="text-xs text-muted-foreground">Points</p>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-white/5">
+          <div className="flex items-center justify-center mb-1">
+            {module.bugsFixed && module.bugsFixed > 0 ? (
+              <Bug className="w-4 h-4 text-destructive" />
+            ) : (
+              <Users className="w-4 h-4 text-accent" />
+            )}
+          </div>
+          {module.bugsFixed && module.bugsFixed > 0 ? (
+            <>
+              <p className="text-2xl font-bold tabular-nums">{module.bugsFixed.toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground">Bugs Fixed</p>
+            </>
+          ) : (
+            <>
+              <p className="text-2xl font-bold tabular-nums">{(module.contributors || 0).toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground">Contributors</p>
+            </>
+          )}
         </div>
       </div>
     </Card>

@@ -57,7 +57,7 @@ export function IntroSlide({ data }: IntroSlideProps) {
           }`}
         >
           {data.projectName}
-          <span className="ml-3 text-primary">{data.version}</span>
+          {data.version && <span className="ml-3 text-primary">{data.version}</span>}
         </h2>
 
         <div
@@ -74,7 +74,7 @@ export function IntroSlide({ data }: IntroSlideProps) {
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
           }`}
         >
-          A look back at what it took to ship {data.version}
+          A look back at what it took to ship {data.version || data.projectName}
         </p>
 
         <div

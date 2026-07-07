@@ -44,13 +44,15 @@ export function OutroSlide({ data }: OutroSlideProps) {
           </span>
         </h2>
 
-        <h3
-          className={`text-3xl md:text-4xl font-bold text-foreground mb-8 transition-all duration-700 delay-200 ${
-            isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
-          }`}
-        >
-          Version {data.version}
-        </h3>
+        {data.version && (
+          <h3
+            className={`text-3xl md:text-4xl font-bold text-foreground mb-8 transition-all duration-700 delay-200 ${
+              isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
+            }`}
+          >
+            Version {data.version}
+          </h3>
+        )}
 
         <p
           className={`text-xl md:text-2xl text-muted-foreground mb-12 transition-all duration-700 delay-300 ${
@@ -85,7 +87,7 @@ export function OutroSlide({ data }: OutroSlideProps) {
           }`}
         >
           <p className="text-sm text-muted-foreground">
-            {data.projectName} {data.version} • Project Wrapped
+            {data.projectName}{data.version ? ` ${data.version}` : ""} • Project Wrapped
           </p>
         </div>
       </div>

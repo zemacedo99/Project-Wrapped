@@ -148,7 +148,7 @@ export function ChampionsSlide({ contributors }: ChampionsSlideProps) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          {reviewChampion && (
+          {reviewChampion && reviewChampion.pullRequestsReviewed > 0 && (
             <ChampionCard
               title="Review Champion"
               subtitle="Code Quality Guardian"
@@ -168,7 +168,7 @@ export function ChampionsSlide({ contributors }: ChampionsSlideProps) {
             />
           )}
 
-          {commentsChampion && (
+          {commentsChampion && commentsChampion.commentsWritten > 0 && (
             <ChampionCard
               title="Comments Champion"
               subtitle="Communication Expert"

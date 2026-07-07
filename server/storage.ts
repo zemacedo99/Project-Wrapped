@@ -45,11 +45,24 @@ export class DatabaseStorage implements IStorage {
 
   async saveWrapped(data: ProjectWrappedData): Promise<SavedWrappedResult> {
     const id = generateId();
-    const [saved] = await db.insert(savedWrapped).values({
-      id,
-      projectName: data.projectName,
-      data,
-    }).returning();
+    let saved;
+    try {
+      [saved] = await db.insert(savedWrapped).values({
+        id,
+        projectName: data.projectName,
+        data,
+      }).returning();
+    } catch (error) {
+      // AggregateError (thrown when connecting to multiple resolved addresses, e.g. "localhost")
+      // has an empty top-level message by default, so pull details from its nested errors instead.
+      const nested = error instanceof AggregateError ? error.errors : undefined;
+      const message = nested?.length
+        ? nested.map(e => (e instanceof Error ? e.message : String(e))).join("; ")
+        : error instanceof Error && error.message
+          ? error.message
+          : String(error);
+      throw new Error(`Failed to save data to database. Is PostgreSQL running and reachable at DATABASE_URL? (${message})`);
+    }
     
     return {
       id: saved.id,
