@@ -100,11 +100,39 @@ export async function fetchGitHubData(config: GitHubConfig): Promise<ProjectWrap
   const totalStats = {
     totalCommits: commits.length,
     totalPullRequests: pullRequests.length,
-    totalReviews: pullRequests.reduce((acc, pr) => acc + (pr.requested_reviewers?.length || 0), 0),
+    // "requested_reviewers" are pending review requests, not completed reviews, so we do
+    // not report a review count here (fetching /pulls/{n}/reviews per PR is a future item).
+    totalReviews: 0,
     totalComments: 0,
     totalBugsFixed: issues.filter(i => i.labels.some(l => l.name.toLowerCase().includes("bug")) && i.state === "closed").length,
-    totalStoryPointsDone: issues.filter(i => i.state === "closed").length * 2,
+    // GitHub issues carry no story points; we don't invent a value from closed-issue counts.
+    totalStoryPointsDone: 0,
     sprintsCompleted: Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)),
+  };
+
+  const meta = {
+    source: "GitHub",
+    generatedAt: new Date().toISOString(),
+    project: `${config.owner}/${config.repo}`,
+    filters: {
+      dateFrom,
+      dateTo,
+      dateField: "Commits by commit date; PRs and issues are not date-filtered",
+    },
+    counts: {
+      commits: commits.length,
+      pullRequests: pullRequests.length,
+      workItems: issues.length,
+      repositories: 1,
+    },
+    definitions: [
+      "Bugs fixed: closed issues labelled with a name containing \"bug\".",
+      "Commits: from the default branch within the date range (up to the fetch page limit).",
+    ],
+    notes: [
+      "Reviews, comments and story points are not available from the GitHub endpoints currently queried, so those metrics are omitted rather than shown partially.",
+      "Commit and PR history is capped by the paging limit (1000 commits / 500 PRs), so very large repositories may be truncated.",
+    ],
   };
 
   return {
@@ -120,6 +148,7 @@ export async function fetchGitHubData(config: GitHubConfig): Promise<ProjectWrap
     top5,
     highlights,
     milestones,
+    meta,
   };
 }
 
@@ -274,21 +303,8 @@ function aggregateContributorStats(
       });
     }
     contributorMap.get(name)!.pullRequestsOpened++;
-
-    for (const reviewer of pr.requested_reviewers || []) {
-      if (!contributorMap.has(reviewer.login)) {
-        contributorMap.set(reviewer.login, {
-          name: reviewer.login,
-          commits: 0,
-          pullRequestsOpened: 0,
-          pullRequestsReviewed: 0,
-          commentsWritten: 0,
-          bugsFixed: 0,
-          storyPointsDone: 0,
-        });
-      }
-      contributorMap.get(reviewer.login)!.pullRequestsReviewed++;
-    }
+    // Note: pr.requested_reviewers are *pending* review requests, not completed
+    // reviews, so we intentionally don't credit them as reviews here.
   }
 
   for (const issue of issues) {
@@ -298,7 +314,6 @@ function aggregateContributorStats(
         if (issue.labels.some(l => l.name.toLowerCase().includes("bug"))) {
           contributorMap.get(name)!.bugsFixed++;
         }
-        contributorMap.get(name)!.storyPointsDone += 2;
       }
     }
   }

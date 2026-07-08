@@ -20,10 +20,15 @@ Project-Wrapped takes your Azure DevOps data and transforms it into a beautiful 
 
 Connects to Azure DevOps (cloud or on-premises) and fetches:
 - Git commits from all repositories
-- Pull requests with reviewer data
-- PR discussion comments
+- Pull requests with reviewer (vote) data
 - Work items (Bugs, Features, Test Cases, Requirements, etc.)
-- File change history
+
+> **Not collected (by design):** PR discussion comments and lines-added/deleted / files
+> changed are intentionally omitted — scanning every PR thread and diff at project scale
+> is too slow, so those metrics are left out rather than shown partially. Each generated
+> recap includes a **"How these numbers were calculated"** panel with the exact filters,
+> counts and KPI definitions used. See [ROADMAP.md](ROADMAP.md) for planned work and the
+> full list of metric definitions and assumptions.
 
 ## Tech Stack
 

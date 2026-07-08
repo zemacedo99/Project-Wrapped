@@ -11,7 +11,7 @@ interface AzureDevOpsConfig {
   dateTo?: string;
 }
 
-interface AzureDevOpsCommit {
+export interface AzureDevOpsCommit {
   commitId: string;
   author: {
     name: string;
@@ -27,7 +27,7 @@ interface AzureDevOpsCommit {
   repoName?: string;
 }
 
-interface AzureDevOpsPullRequest {
+export interface AzureDevOpsPullRequest {
   pullRequestId: number;
   title: string;
   status: string;
@@ -46,7 +46,7 @@ interface AzureDevOpsPullRequest {
   };
 }
 
-interface AzureDevOpsWorkItem {
+export interface AzureDevOpsWorkItem {
   id: number;
   fields: {
     "System.Title": string;
@@ -59,6 +59,55 @@ interface AzureDevOpsWorkItem {
     "System.CreatedDate": string;
     "System.AreaPath"?: string;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Metric definitions
+// Every KPI is derived here so the numbers are computed consistently across the
+// project-level stats, per-contributor stats, per-module stats, highlights and
+// fun facts — and so each definition can be documented and traced (see the
+// `meta.definitions` block attached to the wrapped data).
+// ---------------------------------------------------------------------------
+
+// Work item states that count as "completed" across the common Azure DevOps
+// process templates: Scrum (Done), Agile (Resolved/Closed) and CMMI
+// (Resolved/Closed). Compared case-insensitively.
+const DONE_STATES = new Set(["done", "closed", "resolved", "completed"]);
+
+const DONE_STATES_LABEL = "Done, Closed, Resolved or Completed";
+
+export function isDoneState(state?: string): boolean {
+  return !!state && DONE_STATES.has(state.trim().toLowerCase());
+}
+
+export function isBug(wi: AzureDevOpsWorkItem): boolean {
+  return (wi.fields["System.WorkItemType"] || "").trim().toLowerCase() === "bug";
+}
+
+// A bug counts as "fixed" when it is a Bug work item in a completed state.
+export function isBugFixed(wi: AzureDevOpsWorkItem): boolean {
+  return isBug(wi) && isDoneState(wi.fields["System.State"]);
+}
+
+// Story points are only credited once the work item reaches a completed state,
+// matching the "story points delivered / done" label shown in the UI.
+export function completedStoryPoints(wi: AzureDevOpsWorkItem): number {
+  return isDoneState(wi.fields["System.State"])
+    ? wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0
+    : 0;
+}
+
+// True when an ISO date string falls within an optional [from, to] window.
+// `to` is treated as inclusive of the whole day (dates are compared as UTC).
+export function withinRange(dateIso?: string, from?: string, to?: string): boolean {
+  if (!from && !to) return true;
+  if (!dateIso) return false;
+  const t = new Date(dateIso).getTime();
+  if (Number.isNaN(t)) return false;
+  if (from && t < new Date(from).getTime()) return false;
+  // Add one day (minus 1ms) so a "to" of 2024-12-31 includes all of that day.
+  if (to && t > new Date(to).getTime() + 24 * 60 * 60 * 1000 - 1) return false;
+  return true;
 }
 
 async function fetchAzureDevOps<T>(
@@ -144,7 +193,7 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 
   const [commits, pullRequests, workItems] = await Promise.all([
     fetchCommits(config, repositories, dateFrom, dateTo),
-    fetchPullRequests(config, repositories),
+    fetchPullRequests(config, repositories, dateFrom, dateTo),
     fetchWorkItems(config, dateFrom, dateTo),
   ]);
 
@@ -177,8 +226,8 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     // Per-PR comment threads cannot be scanned at project scale (thousands of PRs) without
     // timing out, so we do not report a comment count rather than showing a misleading partial number.
     totalComments: 0,
-    totalBugsFixed: workItems.filter(wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done").length,
-    totalStoryPointsDone: workItems.reduce((acc, wi) => acc + (wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0), 0),
+    totalBugsFixed: workItems.filter(isBugFixed).length,
+    totalStoryPointsDone: workItems.reduce((acc, wi) => acc + completedStoryPoints(wi), 0),
     sprintsCompleted: dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0,
     totalRepositories: repositories.length,
     avgPrMergeTimeHours: prMergeStats.avgMergeTimeHours,
@@ -210,12 +259,53 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     ? new Date(maxCommitTs).toISOString().split("T")[0]
     : new Date().toISOString().split("T")[0];
 
+  const rangeStart = dateFrom || derivedStart;
+  const rangeEnd = dateTo || derivedEnd;
+
+  // Provenance / methodology so every headline number is traceable back to the
+  // source query, the filters applied and the definitions used to compute it.
+  const meta = {
+    source: "Azure DevOps",
+    generatedAt: new Date().toISOString(),
+    organization: config.organization,
+    project: config.project,
+    // baseUrl is the server address only — the PAT is never included.
+    baseUrl: config.baseUrl || "https://dev.azure.com",
+    filters: {
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo || undefined,
+      dateField: dateFrom || dateTo
+        ? "Commits by commit date, PRs by creation date, work items by created date"
+        : "None — full project history",
+    },
+    repositoriesIncluded: repositories.map(r => r.name),
+    counts: {
+      commits: commits.length,
+      pullRequests: pullRequests.length,
+      workItems: workItems.length,
+      repositories: repositories.length,
+    },
+    definitions: [
+      `Bugs fixed: work items of type "Bug" in a completed state (${DONE_STATES_LABEL}).`,
+      `Story points: sum of Story Points on work items in a completed state (${DONE_STATES_LABEL}).`,
+      "Code reviews: reviewers who cast a vote (approved, approved w/ suggestions, waiting or rejected) on a PR.",
+      "PR merge rate: completed PRs ÷ all PRs in range.",
+      "Longest streak: most consecutive calendar days with at least one commit, per author.",
+    ],
+    notes: [
+      "PR discussion comments and lines-added/deleted are not collected — scanning every PR thread at project scale is too slow, so those metrics are intentionally omitted rather than shown partially.",
+      "Contributors from commits are identified by git author name; contributors from PRs and work items by their Azure DevOps display name. If a person's git name differs from their display name they may appear more than once.",
+      "Activity hours (busiest hour, night owl / early bird) are computed in the server's local timezone.",
+      "Sprints completed is estimated from the date range assuming a two-week cadence, not read from Azure DevOps iterations.",
+    ],
+  };
+
   return {
     projectName: config.project,
     version: "",
     dateRange: {
-      start: dateFrom || derivedStart,
-      end: dateTo || derivedEnd,
+      start: rangeStart,
+      end: rangeEnd,
     },
     stats: totalStats,
     contributors: contributorStats,
@@ -228,6 +318,7 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     activityPattern,
     funFacts,
     workItemBreakdown,
+    meta,
   };
 }
 
@@ -246,7 +337,7 @@ async function fetchRepositories(config: AzureDevOpsConfig): Promise<Array<{ id:
 }
 
 // Calculate PR merge time statistics
-function calculatePrMergeStats(pullRequests: AzureDevOpsPullRequest[]): { 
+export function calculatePrMergeStats(pullRequests: AzureDevOpsPullRequest[]): {
   avgMergeTimeHours: number; 
   fastestMergeTimeHours: number;
   mergeTimeByAuthor: Map<string, number[]>;
@@ -319,7 +410,7 @@ function calculateActivityPattern(commits: AzureDevOpsCommit[]): ActivityPattern
 }
 
 // Calculate commit streaks
-function calculateStreaks(commits: AzureDevOpsCommit[]): {
+export function calculateStreaks(commits: AzureDevOpsCommit[]): {
   longestStreak: number;
   streaksByAuthor: Map<string, number>;
 } {
@@ -492,7 +583,9 @@ async function fetchCommits(
 
 async function fetchPullRequests(
   config: AzureDevOpsConfig,
-  repositories: Array<{ id: string; name: string }>
+  repositories: Array<{ id: string; name: string }>,
+  dateFrom?: string,
+  dateTo?: string
 ): Promise<AzureDevOpsPullRequest[]> {
   try {
     console.log(`[Azure DevOps] Fetching pull requests from ${repositories.length} repositories...`);
@@ -529,8 +622,20 @@ async function fetchPullRequests(
       }
     }
 
-    console.log(`[Azure DevOps] Total pull requests fetched: ${allPRs.length}`);
-    return allPRs;
+    // Scope PRs to the requested date range (by creation date) so PR-derived
+    // metrics stay consistent with the commit and work-item metrics, which are
+    // filtered on the same window. The PR list API has no reliable server-side
+    // date filter, so we filter here after fetching.
+    const scopedPRs = (dateFrom || dateTo)
+      ? allPRs.filter(pr => withinRange(pr.creationDate, dateFrom, dateTo))
+      : allPRs;
+
+    if (scopedPRs.length !== allPRs.length) {
+      console.log(`[Azure DevOps] Pull requests in date range: ${scopedPRs.length} of ${allPRs.length} fetched`);
+    } else {
+      console.log(`[Azure DevOps] Total pull requests fetched: ${allPRs.length}`);
+    }
+    return scopedPRs;
   } catch (error) {
     console.error("[Azure DevOps] Failed to fetch pull requests:", error);
     throw error;
@@ -645,7 +750,7 @@ async function fetchWorkItems(
   }
 }
 
-function aggregateContributorStats(
+export function aggregateContributorStats(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   workItems: AzureDevOpsWorkItem[],
@@ -658,7 +763,7 @@ function aggregateContributorStats(
   const commitHoursByAuthor = new Map<string, number[]>();
 
   for (const commit of commits) {
-    const name = commit.author.name;
+    const name = commit.author?.name?.trim() || "Unknown";
     if (!contributorMap.has(name)) {
       contributorMap.set(name, {
         name,
@@ -684,7 +789,7 @@ function aggregateContributorStats(
   }
 
   for (const pr of pullRequests) {
-    const name = pr.createdBy.displayName;
+    const name = pr.createdBy?.displayName?.trim() || "Unknown";
     if (!contributorMap.has(name)) {
       contributorMap.set(name, {
         name,
@@ -708,9 +813,10 @@ function aggregateContributorStats(
       // Only count reviewers who actually cast a vote (approve/reject/waiting), matching the
       // project-level "reviews" metric. Assigned-but-inactive reviewers are ignored.
       if (reviewer.vote === 0) continue;
-      if (!contributorMap.has(reviewer.displayName)) {
-        contributorMap.set(reviewer.displayName, {
-          name: reviewer.displayName,
+      const reviewerName = reviewer.displayName?.trim() || "Unknown";
+      if (!contributorMap.has(reviewerName)) {
+        contributorMap.set(reviewerName, {
+          name: reviewerName,
           commits: 0,
           pullRequestsOpened: 0,
           pullRequestsReviewed: 0,
@@ -723,20 +829,39 @@ function aggregateContributorStats(
           longestStreak: 0,
           favoriteHour: 0,
         });
-        commitHoursByAuthor.set(reviewer.displayName, new Array(24).fill(0));
+        commitHoursByAuthor.set(reviewerName, new Array(24).fill(0));
       }
-      contributorMap.get(reviewer.displayName)!.pullRequestsReviewed++;
+      contributorMap.get(reviewerName)!.pullRequestsReviewed++;
     }
   }
 
   for (const wi of workItems) {
-    const assignee = wi.fields["System.AssignedTo"]?.displayName;
-    if (assignee && contributorMap.has(assignee)) {
-      if (wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done") {
-        contributorMap.get(assignee)!.bugsFixed++;
-      }
-      contributorMap.get(assignee)!.storyPointsDone += wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0;
+    const assignee = wi.fields["System.AssignedTo"]?.displayName?.trim();
+    if (!assignee) continue;
+
+    // Include people who only have work items assigned (no commits/PRs) so the roster is complete.
+    if (!contributorMap.has(assignee)) {
+      contributorMap.set(assignee, {
+        name: assignee,
+        commits: 0,
+        pullRequestsOpened: 0,
+        pullRequestsReviewed: 0,
+        commentsWritten: 0,
+        bugsFixed: 0,
+        storyPointsDone: 0,
+        linesAdded: 0,
+        linesDeleted: 0,
+        avgPrMergeTimeHours: 0,
+        longestStreak: 0,
+        favoriteHour: 0,
+      });
+      commitHoursByAuthor.set(assignee, new Array(24).fill(0));
     }
+
+    if (isBugFixed(wi)) {
+      contributorMap.get(assignee)!.bugsFixed++;
+    }
+    contributorMap.get(assignee)!.storyPointsDone += completedStoryPoints(wi);
   }
 
   // Add PR merge time and streak data
@@ -757,15 +882,16 @@ function aggregateContributorStats(
     }
   });
 
+  // Return every contributor (sorted by commits). Champions/Top 5 take their own slices,
+  // and the Contributors slide shows the full roster of people who worked on the project.
   return Array.from(contributorMap.values())
-    .sort((a, b) => b.commits - a.commits)
-    .slice(0, 10);
+    .sort((a, b) => b.commits - a.commits);
 }
 
 // Modules are derived from work item Area Paths. We can only attribute work items
 // (not commits or PRs) to an area path, so we report work items, story points, bugs
 // and contributors — the metrics that are actually available at this granularity.
-function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
+export function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
   interface ModuleAcc {
     name: string;
     workItems: number;
@@ -794,13 +920,12 @@ function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
 
     const acc = moduleMap.get(moduleName)!;
     acc.workItems++;
-    acc.storyPointsDone += wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0;
+    acc.storyPointsDone += completedStoryPoints(wi);
 
-    const state = wi.fields["System.State"];
-    if (state === "Done" || state === "Closed" || state === "Resolved") {
+    if (isDoneState(wi.fields["System.State"])) {
       acc.doneCount++;
     }
-    if (wi.fields["System.WorkItemType"] === "Bug" && state === "Done") {
+    if (isBugFixed(wi)) {
       acc.bugsFixed++;
     }
     const assignee = wi.fields["System.AssignedTo"]?.displayName;
@@ -827,8 +952,8 @@ function aggregateModuleStats(workItems: AzureDevOpsWorkItem[]): Module[] {
     });
 }
 
-function calculateTop5(
-  contributors: Contributor[], 
+export function calculateTop5(
+  contributors: Contributor[],
   commits: AzureDevOpsCommit[],
   streakData: { streaksByAuthor: Map<string, number> }
 ): Top5 {
@@ -897,9 +1022,7 @@ function generateHighlights(
 
   // Add type-specific highlights
   const bugs = workItemsByType.get("Bug") || 0;
-  const bugsFixed = workItems.filter(
-    wi => wi.fields["System.WorkItemType"] === "Bug" && wi.fields["System.State"] === "Done"
-  ).length;
+  const bugsFixed = workItems.filter(isBugFixed).length;
   if (bugsFixed > 0) {
     highlights.push(`${bugsFixed} bugs squashed out of ${bugs} total`);
   } else if (bugs > 0) {
@@ -922,10 +1045,7 @@ function generateHighlights(
     highlights.push(`${srds} requirements documented`);
   }
 
-  const totalStoryPoints = workItems.reduce(
-    (acc, wi) => acc + (wi.fields["Microsoft.VSTS.Scheduling.StoryPoints"] || 0),
-    0
-  );
+  const totalStoryPoints = workItems.reduce((acc, wi) => acc + completedStoryPoints(wi), 0);
   if (totalStoryPoints > 0) {
     highlights.push(`${totalStoryPoints} story points delivered`);
   }
@@ -1015,7 +1135,7 @@ function generateFunFacts(
   }
 
   // Fun fact: work item velocity
-  const doneWorkItems = workItems.filter(wi => wi.fields["System.State"] === "Done").length;
+  const doneWorkItems = workItems.filter(wi => isDoneState(wi.fields["System.State"])).length;
   if (doneWorkItems > 100) {
     funFacts.push(`💪 ${doneWorkItems} work items completed - unstoppable!`);
   } else if (doneWorkItems > 50) {

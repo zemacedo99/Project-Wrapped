@@ -1,6 +1,6 @@
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import type { Milestone } from "@shared/schema";
-import { Rocket, Flag, Lightbulb, RefreshCw, Lock, PartyPopper } from "lucide-react";
+import { Rocket, Flag, Lightbulb, RefreshCw, Lock, PartyPopper, Flame } from "lucide-react";
 
 interface TimelineSlideProps {
   milestones: Milestone[];
@@ -12,6 +12,7 @@ function getIconComponent(iconName: string) {
   const icons: Record<string, React.ReactNode> = {
     rocket: <Rocket className="w-6 h-6" />,
     flag: <Flag className="w-6 h-6" />,
+    flame: <Flame className="w-6 h-6" />,
     lightbulb: <Lightbulb className="w-6 h-6" />,
     refresh: <RefreshCw className="w-6 h-6" />,
     lock: <Lock className="w-6 h-6" />,
@@ -40,6 +41,21 @@ function formatDate(dateString: string): string {
 export function TimelineSlide({ milestones, dateRange, sprintsCompleted }: TimelineSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.15 });
 
+  // Prefer an honest duration over a fabricated sprint count. `sprintsCompleted`
+  // is an estimate (date range ÷ two weeks), so label it as such; when it is not
+  // available fall back to the real elapsed months.
+  const monthsBetween = (() => {
+    const s = new Date(dateRange.start).getTime();
+    const e = new Date(dateRange.end).getTime();
+    if (Number.isNaN(s) || Number.isNaN(e) || e < s) return 0;
+    return Math.max(1, Math.round((e - s) / (30.44 * 24 * 60 * 60 * 1000)));
+  })();
+
+  const cadenceText =
+    sprintsCompleted > 0
+      ? `~${sprintsCompleted} two-week sprints (estimated) of building, breaking, and shipping`
+      : `${monthsBetween} month${monthsBetween === 1 ? "" : "s"} of building, breaking, and shipping`;
+
   return (
     <section
       ref={ref}
@@ -62,7 +78,7 @@ export function TimelineSlide({ milestones, dateRange, sprintsCompleted }: Timel
             {formatDate(dateRange.start)} to {formatDate(dateRange.end)}
           </p>
           <p className="text-lg text-muted-foreground">
-            {sprintsCompleted} sprints of building, breaking, and shipping
+            {cadenceText}
           </p>
         </div>
 

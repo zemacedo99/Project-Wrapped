@@ -5,6 +5,7 @@ import type { ProjectWrappedData } from "@shared/schema";
 import { IntroSlide } from "@/components/slides/intro-slide";
 import { GlobalStatsSlide } from "@/components/slides/global-stats-slide";
 import { ChampionsSlide } from "@/components/slides/champions-slide";
+import { ContributorsSlide } from "@/components/slides/contributors-slide";
 import { Top5Slide } from "@/components/slides/top5-slide";
 import { ModulesSlide } from "@/components/slides/modules-slide";
 import { TimelineSlide } from "@/components/slides/timeline-slide";
@@ -22,6 +23,7 @@ const sectionIds = [
   "slide-intro",
   "slide-global-stats",
   "slide-champions",
+  "slide-contributors",
   "slide-top5",
   "slide-modules",
   "slide-timeline",
@@ -33,6 +35,7 @@ const sectionNames = [
   "Intro",
   "Stats",
   "Champions",
+  "Team",
   "Top 5",
   "Modules",
   "Timeline",
@@ -283,7 +286,7 @@ export default function ProjectWrapped() {
               )}
               <div className="text-left">
                 <div className="font-medium">Export All Slides</div>
-                <div className="text-xs text-muted-foreground">Download all 8 slides as PNG images</div>
+                <div className="text-xs text-muted-foreground">Download all {sectionIds.length} slides as PNG images</div>
               </div>
             </Button>
             <Button
@@ -310,8 +313,9 @@ export default function ProjectWrapped() {
       />
 
       <IntroSlide data={data} />
-      <GlobalStatsSlide stats={data.stats} />
+      <GlobalStatsSlide stats={data.stats} meta={data.meta} dateRange={data.dateRange} />
       <ChampionsSlide contributors={data.contributors} />
+      <ContributorsSlide contributors={data.contributors} />
       <Top5Slide top5={data.top5} />
       <ModulesSlide modules={data.modules} />
       <TimelineSlide

@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useAnimatedCounter, formatNumber } from "@/hooks/use-animated-counter";
-import type { ProjectStats } from "@shared/schema";
+import type { ProjectStats, WrappedMeta } from "@shared/schema";
 import { Card } from "@/components/ui/card";
+import { DataProvenance } from "@/components/data-provenance";
 import { GitCommit, GitPullRequest, Eye, MessageCircle, Target, Zap, FileCode, Clock, Flame, FolderGit } from "lucide-react";
 
 interface GlobalStatsSlideProps {
   stats: ProjectStats;
+  meta?: WrappedMeta;
+  dateRange: { start: string; end: string };
 }
 
 interface StatCardProps {
@@ -16,9 +19,10 @@ interface StatCardProps {
   delay: number;
   isVisible: boolean;
   gradient: string;
+  suffix?: string;
 }
 
-function StatCard({ icon, label, value, delay, isVisible, gradient }: StatCardProps) {
+function StatCard({ icon, label, value, delay, isVisible, gradient, suffix }: StatCardProps) {
   const [shouldAnimate, setShouldAnimate] = useState(false);
   const { count, startAnimation } = useAnimatedCounter({
     end: value,
@@ -58,17 +62,26 @@ function StatCard({ icon, label, value, delay, isVisible, gradient }: StatCardPr
         </div>
         <div className="text-5xl md:text-6xl font-black tabular-nums">
           {formatNumber(count)}
+          {suffix && (
+            <span className="text-2xl md:text-3xl font-bold text-muted-foreground">{suffix}</span>
+          )}
         </div>
       </div>
     </Card>
   );
 }
 
-export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
+export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.2 });
 
   // Filter to show only stats with meaningful values
-  const allStatCards = [
+  const allStatCards: Array<{
+    icon: React.ReactNode;
+    label: string;
+    value: number;
+    gradient: string;
+    suffix?: string;
+  }> = [
     {
       icon: <GitCommit className="w-6 h-6 text-primary" />,
       label: "Total Commits",
@@ -155,7 +168,7 @@ export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
           </h2>
           <p className="text-xl text-muted-foreground">
             {stats.prMergeRate ? `${stats.prMergeRate}% PR merge rate • ` : ''}
-            Every commit, review, and comment that made it happen
+            Every commit, review, and work item that made it happen
           </p>
         </div>
 
@@ -169,9 +182,12 @@ export function GlobalStatsSlide({ stats }: GlobalStatsSlideProps) {
               delay={index * 100}
               isVisible={isVisible}
               gradient={stat.gradient}
+              suffix={stat.suffix}
             />
           ))}
         </div>
+
+        <DataProvenance meta={meta} dateRange={dateRange} />
       </div>
     </section>
   );

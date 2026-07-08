@@ -113,6 +113,35 @@ export const projectStatsSchema = z.object({
   prMergeRate: z.number().optional(), // percentage of PRs merged
 });
 
+// Provenance / methodology: describes where the numbers came from, which
+// filters were applied, and how each KPI is defined — so the recap is
+// traceable back to the real source data.
+export const wrappedMetaSchema = z.object({
+  source: z.string(), // e.g. "Azure DevOps", "GitHub"
+  generatedAt: z.string(), // ISO timestamp
+  organization: z.string().optional(),
+  project: z.string().optional(),
+  baseUrl: z.string().optional(), // server address only — never a token
+  filters: z
+    .object({
+      dateFrom: z.string().optional(),
+      dateTo: z.string().optional(),
+      dateField: z.string().optional(), // which date each entity is filtered on
+    })
+    .optional(),
+  repositoriesIncluded: z.array(z.string()).optional(),
+  counts: z
+    .object({
+      commits: z.number(),
+      pullRequests: z.number(),
+      workItems: z.number(),
+      repositories: z.number(),
+    })
+    .optional(),
+  definitions: z.array(z.string()).optional(), // human-readable KPI definitions
+  notes: z.array(z.string()).optional(), // caveats and known limitations
+});
+
 export const projectWrappedDataSchema = z.object({
   projectName: z.string(),
   version: z.string(),
@@ -131,6 +160,7 @@ export const projectWrappedDataSchema = z.object({
   activityPattern: activityPatternSchema.optional(),
   funFacts: z.array(z.string()).optional(),
   workItemBreakdown: z.record(z.string(), z.number()).optional(), // type -> count
+  meta: wrappedMetaSchema.optional(),
 });
 
 export type Contributor = z.infer<typeof contributorSchema>;
@@ -142,6 +172,7 @@ export type BusiestDay = z.infer<typeof busiestDaySchema>;
 export type Top5 = z.infer<typeof top5Schema>;
 export type Milestone = z.infer<typeof milestoneSchema>;
 export type ProjectStats = z.infer<typeof projectStatsSchema>;
+export type WrappedMeta = z.infer<typeof wrappedMetaSchema>;
 export type ProjectWrappedData = z.infer<typeof projectWrappedDataSchema>;
 
 export const savedWrapped = pgTable("saved_wrapped", {
