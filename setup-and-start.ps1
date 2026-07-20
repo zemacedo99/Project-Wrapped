@@ -32,6 +32,14 @@
 .PARAMETER SkipInstall
     In -Dev mode only: skip `npm install`.
 
+.PARAMETER AdvertisedHost
+    Overrides the IP address shown in the "Network:" URL printed at the end
+    of setup (e.g. when auto-detection picks the wrong adapter - a VPN
+    virtual adapter, WSL/Hyper-V/Docker virtual switch, etc). Only affects
+    the displayed URL, never the address the server actually binds to
+    (the server always binds 0.0.0.0, i.e. all interfaces). Can also be set
+    via the ADVERTISED_HOST environment variable.
+
 .EXAMPLE
     .\setup-and-start.ps1
     Fresh clone or daily use: build/start the database + app in Docker.
@@ -47,6 +55,11 @@
 .EXAMPLE
     .\setup-and-start.ps1 -ResetDatabase
     Wipe the local database volume and start clean (asks for confirmation).
+
+.EXAMPLE
+    .\setup-and-start.ps1 -AdvertisedHost 10.53.220.71
+    Force the displayed "Network:" URL to a specific address (e.g. the
+    correct LAN IP when auto-detection picks a VPN/virtual adapter instead).
 #>
 [CmdletBinding()]
 param(
@@ -54,7 +67,8 @@ param(
     [switch]$Stop,
     [switch]$ResetDatabase,
     [switch]$Force,
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [string]$AdvertisedHost
 )
 
 $ErrorActionPreference = "Stop"
@@ -129,6 +143,94 @@ function Test-PortFree([int]$Port) {
     }
     catch {
         return $false
+    }
+}
+
+function Get-LanIp {
+    # Resolves the IP address to advertise in the "Network:" URL. Never
+    # affects what the server actually binds to (always 0.0.0.0 / all
+    # interfaces) - this only picks what to print for convenience.
+    #
+    # Precedence:
+    #   1. -AdvertisedHost parameter
+    #   2. ADVERTISED_HOST environment variable
+    #   3. Auto-detect: the address of the interface that owns the default
+    #      route, skipping loopback/APIPA/virtual adapters (Docker, WSL,
+    #      Hyper-V, VMware/VirtualBox, VPN clients) where possible.
+    #   4. Fallback: first remaining "Preferred" IPv4 address after the same
+    #      exclusions, physical Ethernet/Wi-Fi adapters preferred.
+    if ($AdvertisedHost) { return $AdvertisedHost }
+    if ($env:ADVERTISED_HOST) { return $env:ADVERTISED_HOST }
+
+    $virtualPattern = 'Virtual|VPN|vEthernet|WSL|Hyper-V|VMware|VirtualBox|Docker|Loopback|Tunnel|TAP|Npcap|Bluetooth'
+
+    try {
+        $candidates = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+            $_.IPAddress -ne "127.0.0.1" -and
+            $_.IPAddress -notlike "169.254.*" -and
+            $_.PrefixOrigin -ne "WellKnown" -and
+            $_.AddressState -eq "Preferred"
+        }
+    }
+    catch { return $null }
+
+    if (-not $candidates) { return $null }
+
+    $physical = $candidates | Where-Object { $_.InterfaceAlias -notmatch $virtualPattern }
+
+    # Prefer the interface that owns the lowest-metric default route, if it
+    # survives the physical/virtual filter.
+    try {
+        $defaultRoute = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
+            Sort-Object RouteMetric | Select-Object -First 1
+        if ($defaultRoute) {
+            $onDefaultRoute = $physical | Where-Object { $_.InterfaceIndex -eq $defaultRoute.ifIndex } | Select-Object -First 1
+            if ($onDefaultRoute) { return $onDefaultRoute.IPAddress }
+        }
+    }
+    catch { }
+
+    $preferred = $physical | Where-Object { $_.InterfaceAlias -match "Ethernet|Wi-?Fi" } | Select-Object -First 1
+    if ($preferred) { return $preferred.IPAddress }
+    if ($physical) { return ($physical | Select-Object -First 1).IPAddress }
+
+    # Nothing survived the virtual-adapter filter (e.g. only a VPN adapter is
+    # up) - fall back to any remaining candidate rather than showing nothing.
+    return ($candidates | Select-Object -First 1).IPAddress
+}
+
+function Test-IsAdministrator {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Register-AppFirewallRule([int]$Port) {
+    # Idempotent: creates the inbound allow rule for $Port on first run, and
+    # leaves it alone (no duplicates) on subsequent runs. Scoped by Windows
+    # Firewall profile only (Domain, Private) rather than a specific local
+    # address, since the LAN/VPN-assigned address of this host can change
+    # between reboots or VPN reconnects.
+    $ruleName = "Project-Wrapped TCP $Port"
+    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Ok "Firewall rule '$ruleName' already exists - leaving it as-is."
+        return
+    }
+
+    if (-not (Test-IsAdministrator)) {
+        Write-Warn "Not running as Administrator - cannot create the Windows Firewall rule automatically."
+        Write-Host "   To allow other devices on the network to reach this app, run PowerShell as Administrator and execute:" -ForegroundColor Gray
+        Write-Host "   New-NetFirewallRule -DisplayName '$ruleName' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Domain,Private" -ForegroundColor Gray
+        return
+    }
+
+    try {
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort $Port -Profile Domain, Private -ErrorAction Stop | Out-Null
+        Write-Ok "Created firewall rule '$ruleName' (Domain/Private profiles, TCP $Port)."
+    }
+    catch {
+        Write-Warn "Could not create firewall rule '$ruleName': $($_.Exception.Message)"
     }
 }
 
@@ -312,18 +414,12 @@ if ($Dev) {
     if ($LASTEXITCODE -ne 0) { Fail "Applying the database schema failed. Confirm DATABASE_URL in .env matches the database started above." }
     Write-Ok "Schema is up to date"
 
-    $lanIp = $null
-    try {
-        $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
-            Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
-            Select-Object -First 1 -ExpandProperty IPAddress)
-    }
-    catch { }
+    $lanIp = Get-LanIp
+    Register-AppFirewallRule -Port $port
 
     Write-Step "Starting application (development mode, hot reload)"
     Write-Host "Local:   http://localhost:$port" -ForegroundColor Cyan
     if ($lanIp) { Write-Host "Network: http://${lanIp}:$port" -ForegroundColor Cyan }
-    Write-Host "Windows Firewall may prompt to allow this port on first run - allow it for Private networks." -ForegroundColor Gray
     Write-Host "Press Ctrl+C to stop the server`n" -ForegroundColor Gray
     npm run dev
     exit $LASTEXITCODE
@@ -347,18 +443,11 @@ if (-not (Wait-ServiceHealthy "app" 120)) {
 }
 Write-Ok "Application is healthy"
 
-$lanIp = $null
-try {
-    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
-        Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
-        Select-Object -First 1 -ExpandProperty IPAddress)
-}
-catch { }
+$lanIp = Get-LanIp
+Register-AppFirewallRule -Port $port
 
 Write-Host "`nProject-Wrapped is running." -ForegroundColor Green
 Write-Host "Local:   http://localhost:$port" -ForegroundColor Cyan
 if ($lanIp) { Write-Host "Network: http://${lanIp}:$port" -ForegroundColor Cyan }
-Write-Host "Windows Firewall may prompt to allow this port the first time another device connects - allow it for Private networks, or run:" -ForegroundColor Gray
-Write-Host "   New-NetFirewallRule -DisplayName 'Project-Wrapped' -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow" -ForegroundColor Gray
 Write-Host "`nStop with:   .\setup-and-start.ps1 -Stop" -ForegroundColor Gray
 Write-Host "Update with: git pull; .\setup-and-start.ps1" -ForegroundColor Gray
