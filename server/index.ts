@@ -6,6 +6,11 @@ import { createServer } from "http";
 const app = express();
 const httpServer = createServer(app);
 
+// Trust the first hop reverse proxy (Nginx/Caddy/etc.) so req.protocol,
+// req.ip and secure cookies behave correctly when deployed behind one. Safe
+// no-op when there is no proxy in front of the server.
+app.set("trust proxy", 1);
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
@@ -64,10 +69,15 @@ app.use((req, res, next) => {
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
+    // Log the full error server-side, but never leak internal error details
+    // (messages, stack traces) to the client for unexpected (5xx) failures in
+    // production - only intentional 4xx validation messages are safe to echo.
+    console.error(err);
+    const message =
+      status >= 500 && process.env.NODE_ENV === "production"
+        ? "Internal Server Error"
+        : err.message || "Internal Server Error";
     res.status(status).json({ message });
-    throw err;
   });
 
   // importantly only setup vite in development and after
@@ -80,19 +90,21 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
+  // Serve the app on the port/host specified via environment variables.
   // this serves both the API and the client.
-  // It is the only port that is not firewalled.
+  // HOST defaults to 0.0.0.0 so the server is reachable from other devices on
+  // the network (e.g. http://<your-lan-ip>:PORT). Set HOST=127.0.0.1 to
+  // restrict access to this machine only.
   const port = parseInt(process.env.PORT || "5000", 10);
+  const host = process.env.HOST || "0.0.0.0";
   httpServer.listen(
     {
       port,
-      host: "0.0.0.0",
+      host,
       reusePort: true,
     },
     () => {
-      log(`serving on port ${port}`);
+      log(`serving on http://${host}:${port}`);
     },
   );
 })();

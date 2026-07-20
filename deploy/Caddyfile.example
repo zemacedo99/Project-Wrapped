@@ -1,0 +1,10 @@
+# Example Caddyfile for Project-Wrapped.
+# Caddy automatically obtains and renews a Let's Encrypt certificate for the
+# domain below - no manual certbot step required.
+#
+# Usage: copy this file to Caddyfile, replace the domain, then run:
+#   caddy run --config Caddyfile
+
+wrapped.example.com {
+    reverse_proxy 127.0.0.1:5000
+}

@@ -1,0 +1,57 @@
+# No explicit top-level `name:` / `container_name` is set: Compose derives the
+# project name from the folder name, so cloning this repo into more than one
+# directory (or renaming the folder) does not cause container/volume/network
+# name collisions between the copies.
+#
+# ---------------------------------------------------------------------------
+# Recommended deployment: `docker compose up -d --build` starts BOTH services
+# below (database + containerised app). This is what setup-and-start.ps1 runs
+# by default. Requires only Docker - no local Node.js/npm install needed.
+#
+# For local development with hot-reload, use setup-and-start.ps1 -Dev instead:
+# it starts only `db` here and runs the app on the host with `npm run dev`.
+# ---------------------------------------------------------------------------
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-project_wrapped}
+    ports:
+      # Bound to loopback only: reachable from this machine (e.g. local psql,
+      # or the host-run app in -Dev mode) but never exposed to the LAN or
+      # internet. The containerised `app` service reaches the database over
+      # the internal Compose network and does not need this published port.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - project_wrapped_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-project_wrapped}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: ${PORT:-5000}
+      # Internal service-to-service connection (Compose DNS name "db"),
+      # independent of the DATABASE_URL a host-run dev server would use.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-project_wrapped}
+    ports:
+      - "${PORT:-5000}:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  project_wrapped_pgdata:
+    name: project_wrapped_pgdata
