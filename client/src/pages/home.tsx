@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Upload, FileJson, Database, GitBranch, Sparkles, ArrowRight, CheckCircle, X, Loader2, Cloud } from "lucide-react";
 import { SiGithub } from "react-icons/si";
@@ -32,6 +33,12 @@ export default function Home() {
 
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
+  // Repository selection (import-time): the repos discovered by "Test Connection",
+  // and the subset the user chooses to include. Only the selected repos are fetched.
+  const [azureRepos, setAzureRepos] = useState<string[]>([]);
+  const [selectedRepos, setSelectedRepos] = useState<string[]>([]);
+  const [repoSearch, setRepoSearch] = useState("");
 
   const [githubForm, setGithubForm] = useState({
     owner: "",
@@ -72,7 +79,7 @@ export default function Home() {
   });
 
   const azureMutation = useMutation({
-    mutationFn: async (formData: typeof azureForm) => {
+    mutationFn: async (formData: typeof azureForm & { repositories?: string[] }) => {
       const response = await fetch("/api/connect/azure-devops", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -159,7 +166,11 @@ export default function Home() {
 
   const handleAzureSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    azureMutation.mutate(azureForm);
+    // Send the selected repositories (import-time filter). If every repo is
+    // selected we send [] to mean "all".
+    const repositories =
+      azureRepos.length > 0 && selectedRepos.length < azureRepos.length ? selectedRepos : [];
+    azureMutation.mutate({ ...azureForm, repositories });
   };
 
   const handleTestAzureConnection = async () => {
@@ -180,7 +191,12 @@ export default function Home() {
       
       const result = await response.json();
       setConnectionTestResult(result);
-      
+
+      const repos: string[] = Array.isArray(result.details?.repositories) ? result.details.repositories : [];
+      setAzureRepos(repos);
+      setSelectedRepos(repos); // default: include all discovered repositories
+      setRepoSearch("");
+
       if (result.success) {
         toast({
           title: "Connection successful!",
@@ -429,7 +445,7 @@ export default function Home() {
       </div>
 
       <Dialog open={showAzureDialog} onOpenChange={setShowAzureDialog}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Cloud className="w-5 h-5 text-chart-1" />
@@ -551,7 +567,52 @@ export default function Home() {
                 </>
               )}
             </Button>
-            
+
+            {connectionTestResult?.success && azureRepos.length > 0 && (
+              <div className="space-y-2" data-testid="azure-repo-select">
+                <div className="flex items-center justify-between">
+                  <Label>Repositories to include ({selectedRepos.length}/{azureRepos.length})</Label>
+                  <div className="flex gap-2 text-xs">
+                    <button type="button" className="underline text-muted-foreground hover:text-foreground" onClick={() => setSelectedRepos(azureRepos)}>All</button>
+                    <button type="button" className="underline text-muted-foreground hover:text-foreground" onClick={() => setSelectedRepos([])}>None</button>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Only the selected repositories are fetched, so commit, PR and repository numbers
+                  reflect just these. Work items are project-wide and are not affected.
+                </p>
+                {azureRepos.length > 8 && (
+                  <Input
+                    placeholder="Search repositories…"
+                    value={repoSearch}
+                    onChange={(e) => setRepoSearch(e.target.value)}
+                    className="h-8"
+                    data-testid="input-repo-search"
+                  />
+                )}
+                <div className="max-h-40 overflow-y-auto rounded-md border border-muted-foreground/25 p-2 space-y-1">
+                  {azureRepos
+                    .filter((r) => r.toLowerCase().includes(repoSearch.trim().toLowerCase()))
+                    .map((r) => (
+                      <label key={r} className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={selectedRepos.includes(r)}
+                          onCheckedChange={(v) =>
+                            setSelectedRepos((prev) =>
+                              v === true ? Array.from(new Set([...prev, r])) : prev.filter((x) => x !== r)
+                            )
+                          }
+                        />
+                        <span className="truncate" title={r}>{r}</span>
+                      </label>
+                    ))}
+                </div>
+                {selectedRepos.length === 0 && (
+                  <p className="text-xs text-destructive">Select at least one repository to generate.</p>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="azure-from">Date From (optional)</Label>
@@ -581,9 +642,9 @@ export default function Home() {
               }}>
                 Cancel
               </Button>
-              <Button 
-                type="submit" 
-                disabled={azureMutation.isPending || !connectionTestResult?.success} 
+              <Button
+                type="submit"
+                disabled={azureMutation.isPending || !connectionTestResult?.success || (azureRepos.length > 0 && selectedRepos.length === 0)}
                 data-testid="button-azure-connect"
               >
                 {azureMutation.isPending ? (
@@ -604,7 +665,7 @@ export default function Home() {
       </Dialog>
 
       <Dialog open={showGitHubDialog} onOpenChange={setShowGitHubDialog}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <SiGithub className="w-5 h-5" />

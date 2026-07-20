@@ -10,6 +10,12 @@ import {
   aggregateModuleStats,
   calculateTop5,
   calculatePrMergeStats,
+  newCompleteness,
+  summarizeCompleteness,
+  selectRepositories,
+  canonicalizeContributors,
+  countIterationsInRange,
+  type ImportCompleteness,
   type AzureDevOpsCommit,
   type AzureDevOpsPullRequest,
   type AzureDevOpsWorkItem,
@@ -416,9 +422,266 @@ const legacyWrap = {
   milestones: [],
 };
 
+// ---------------------------------------------------------------------------
+// 10. Import completeness model (P0.2)
+// ---------------------------------------------------------------------------
+
+function tracker(overrides: Partial<ImportCompleteness> = {}): ImportCompleteness {
+  return { ...newCompleteness(), ...overrides };
+}
+
+const anyWarning = (warnings: string[], re: RegExp) => warnings.some((w) => re.test(w));
+
+describe("summarizeCompleteness", () => {
+  test("all data fetched successfully -> complete, no warnings", () => {
+    const s = summarizeCompleteness(
+      tracker({ repositoriesFound: 3, workItemIdsFound: 100, workItemDetailsFetched: 100 }),
+    );
+    assert.equal(s.status, "complete");
+    assert.deepEqual(s.warnings, []);
+    assert.equal(s.repositories.found, 3);
+    assert.equal(s.workItems.detailsFetched, 100);
+  });
+
+  test("one repository fails on commits -> partial, warning names the count", () => {
+    const s = summarizeCompleteness(
+      tracker({ repositoriesFound: 3, commitReposFailed: 1, workItemIdsFound: 10, workItemDetailsFetched: 10 }),
+    );
+    assert.equal(s.status, "partial");
+    assert.ok(anyWarning(s.warnings, /1 of 3/), "warning names 1 of 3 repos");
+    assert.ok(anyWarning(s.warnings, /commit/i), "warning mentions commits");
+  });
+
+  test("PR fetch fails but commits succeed -> partial, PR warning only", () => {
+    const s = summarizeCompleteness(
+      tracker({ repositoriesFound: 3, pullRequestsCategoryFailed: true, workItemIdsFound: 10, workItemDetailsFetched: 10 }),
+    );
+    assert.equal(s.status, "partial");
+    assert.ok(anyWarning(s.warnings, /pull request data could not be fetched/i), "PR warning present");
+    assert.equal(anyWarning(s.warnings, /commits could not be read/i), false, "no commit undercount warning");
+  });
+
+  test("work item detail batch fails -> partial, excluded-items warning", () => {
+    const s = summarizeCompleteness(
+      tracker({ repositoriesFound: 3, workItemIdsFound: 100, workItemDetailsFetched: 80, workItemDetailBatchesFailed: 1 }),
+    );
+    assert.equal(s.status, "partial");
+    assert.ok(anyWarning(s.warnings, /20 of 100/), "warning names 20 of 100 work items");
+    assert.ok(anyWarning(s.warnings, /excluded/i));
+    assert.equal(s.workItems.detailBatchesFailed, 1);
+  });
+
+  test("no repositories returned -> partial with a clear warning", () => {
+    const s = summarizeCompleteness(tracker({ repositoriesFound: 0 }));
+    assert.equal(s.status, "partial");
+    assert.ok(anyWarning(s.warnings, /no repositories were returned/i));
+  });
+
+  test("repository list itself failed -> failed", () => {
+    const s = summarizeCompleteness(tracker({ repositoryListFailed: true }));
+    assert.equal(s.status, "failed");
+    assert.ok(anyWarning(s.warnings, /could not list repositories/i));
+  });
+
+  test("every category failed -> failed", () => {
+    const s = summarizeCompleteness(
+      tracker({
+        repositoriesFound: 3,
+        commitsCategoryFailed: true,
+        pullRequestsCategoryFailed: true,
+        workItemsCategoryFailed: true,
+      }),
+    );
+    assert.equal(s.status, "failed");
+    assert.ok(s.warnings.length >= 1, "failed status always carries at least one warning");
+  });
+
+  test("warnings never leak tokens or raw error objects", () => {
+    const s = summarizeCompleteness(
+      tracker({ repositoryListFailed: true, commitReposFailed: 2, workItemDetailBatchesFailed: 3 }),
+    );
+    for (const w of s.warnings) {
+      assert.equal(typeof w, "string");
+      assert.doesNotMatch(w, /token|pat|password|secret|Bearer|Basic\s/i);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Import-time repository selection (drives which repos' data is fetched)
+// ---------------------------------------------------------------------------
+
+describe("selectRepositories", () => {
+  const repos = [
+    { id: "1", name: "web" },
+    { id: "2", name: "api" },
+    { id: "3", name: "infra" },
+  ];
+
+  test("empty selection includes all repositories", () => {
+    assert.deepEqual(selectRepositories(repos, []), repos);
+    assert.deepEqual(selectRepositories(repos, ["", "  "]), repos); // blanks ignored
+  });
+
+  test("keeps only the selected repositories", () => {
+    assert.deepEqual(
+      selectRepositories(repos, ["web", "infra"]).map(r => r.name),
+      ["web", "infra"]
+    );
+  });
+
+  test("unknown names simply match nothing", () => {
+    assert.deepEqual(selectRepositories(repos, ["ghost"]), []);
+  });
+});
+
+describe("repository filtering changes the numbers", () => {
+  test("aggregating only the selected repos' commits yields different totals", () => {
+    // Simulates the effect of the import-time filter: only selected repos are
+    // fetched, so only their commits reach aggregation.
+    const commits = [
+      commit("Alice", "2024-01-01T09:00:00Z", "web"),
+      commit("Alice", "2024-01-02T09:00:00Z", "web"),
+      commit("Bob", "2024-01-01T09:00:00Z", "api"),
+    ];
+    const selected = selectRepositories(
+      [{ id: "1", name: "web" }, { id: "2", name: "api" }],
+      ["web"]
+    ).map(r => r.name);
+    const selectedSet = new Set(selected);
+    const scopedCommits = commits.filter(c => selectedSet.has(c.repoName!));
+
+    const all = aggregateContributorStats(commits, [], [], NO_MERGE, NO_STREAK);
+    const scoped = aggregateContributorStats(scopedCommits, [], [], NO_MERGE, NO_STREAK);
+
+    assert.equal(all.reduce((n, c) => n + c.commits, 0), 3);
+    assert.equal(scoped.reduce((n, c) => n + c.commits, 0), 2, "only 'web' commits counted");
+    assert.equal(scoped.find(c => c.name === "Bob"), undefined, "Bob (api only) drops out");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. Canonical contributor identity (auto-merge)
+// ---------------------------------------------------------------------------
+
+describe("canonicalizeContributors", () => {
+  function person(name: string, over: Record<string, unknown> = {}) {
+    return {
+      name,
+      commits: 0,
+      pullRequestsOpened: 0,
+      pullRequestsReviewed: 0,
+      commentsWritten: 0,
+      bugsFixed: 0,
+      storyPointsDone: 0,
+      ...over,
+    } as Parameters<typeof canonicalizeContributors>[0][number];
+  }
+
+  test("exact email match: git email == Azure uniqueName merges into one person", () => {
+    const canon = canonicalizeContributors([
+      person("jamacedo", { commits: 1079, email: "jose.macedo@x.io", source: "git" }),
+      person("José Macedo", { commits: 823, pullRequestsOpened: 40, uniqueName: "jose.macedo@x.io", source: "azure" }),
+    ]);
+    assert.equal(canon.length, 1);
+    assert.equal(canon[0].name, "José Macedo", "prefers the Azure display name as canonical");
+    assert.equal(canon[0].commits, 1902, "commits summed across identities");
+    assert.equal(canon[0].pullRequestsOpened, 40);
+    assert.equal(canon[0].source, "mixed");
+    assert.equal(canon[0].isUnmappedGit, false);
+    assert.equal(canon[0].aliases?.length, 2);
+  });
+
+  test("exact normalized-name match merges (case-insensitive)", () => {
+    const canon = canonicalizeContributors([
+      person("Alice Smith", { commits: 10, source: "git" }),
+      person("alice smith", { commits: 5, pullRequestsOpened: 2, source: "azure" }),
+    ]);
+    assert.equal(canon.length, 1);
+    assert.equal(canon[0].commits, 15);
+  });
+
+  test("an unmatched git identity stays separate and is flagged isUnmappedGit", () => {
+    const canon = canonicalizeContributors([
+      person("build-bot", { commits: 500, email: "bot@x.io", source: "git" }),
+      person("Dev One", { commits: 3, uniqueName: "dev@x.io", source: "azure" }),
+    ]);
+    assert.equal(canon.length, 2);
+    assert.equal(canon.find(c => c.name === "build-bot")?.isUnmappedGit, true);
+    assert.equal(canon.find(c => c.name === "Dev One")?.isUnmappedGit, false);
+  });
+
+  test("no duplicate rows; the merged total wins the ranking (Champion == Top)", () => {
+    const canon = canonicalizeContributors([
+      person("jdoe", { commits: 100, email: "j@x.io", source: "git" }),
+      person("John Doe", { commits: 50, uniqueName: "j@x.io", source: "azure" }),
+      person("Other", { commits: 120, uniqueName: "o@x.io", source: "azure" }),
+    ]);
+    assert.equal(canon.length, 2);
+    assert.equal(canon[0].name, "John Doe", "merged 150 beats Other's 120");
+    assert.equal(canon[0].commits, 150);
+  });
+
+  test("distinct people are not merged", () => {
+    const canon = canonicalizeContributors([
+      person("Ana", { commits: 5, uniqueName: "ana@x.io", source: "azure" }),
+      person("Beto", { commits: 7, uniqueName: "beto@x.io", source: "azure" }),
+    ]);
+    assert.equal(canon.length, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. Real iterations / sprints
+// ---------------------------------------------------------------------------
+
+describe("countIterationsInRange", () => {
+  const iters = [
+    { name: "S1", startDate: "2024-01-01", finishDate: "2024-01-14" },
+    { name: "S2", startDate: "2024-01-15", finishDate: "2024-01-28" },
+    { name: "S3", startDate: "2024-06-01", finishDate: "2024-06-14" },
+    { name: "Backlog" }, // undated -> never counted
+  ];
+
+  test("no range counts all dated iterations", () => {
+    assert.equal(countIterationsInRange(iters), 3);
+  });
+
+  test("counts only iterations overlapping the range", () => {
+    assert.equal(countIterationsInRange(iters, "2024-01-01", "2024-01-31"), 2);
+    assert.equal(countIterationsInRange(iters, "2024-06-01", "2024-12-31"), 1);
+  });
+
+  test("boundary day overlap is inclusive", () => {
+    assert.equal(countIterationsInRange(iters, "2024-01-14", "2024-01-14"), 1);
+  });
+});
+
 describe("wrapped schema / provenance", () => {
   test("a wrap WITHOUT meta still validates (old saved wraps & sample data keep working)", () => {
     const parsed = projectWrappedDataSchema.safeParse(legacyWrap);
+    assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error?.issues));
+  });
+
+  test("a wrap with meta but WITHOUT completeness still validates (wraps saved before P0.2)", () => {
+    const withMetaNoCompleteness = {
+      ...legacyWrap,
+      meta: { source: "Azure DevOps", generatedAt: "2026-01-01T00:00:00.000Z" },
+    };
+    const parsed = projectWrappedDataSchema.safeParse(withMetaNoCompleteness);
+    assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error?.issues));
+  });
+
+  test("a wrap carrying a completeness block validates", () => {
+    const withCompleteness = {
+      ...legacyWrap,
+      meta: {
+        source: "Azure DevOps",
+        generatedAt: "2026-07-08T00:00:00.000Z",
+        completeness: summarizeCompleteness(tracker({ repositoriesFound: 2, commitReposFailed: 1 })),
+      },
+    };
+    const parsed = projectWrappedDataSchema.safeParse(withCompleteness);
     assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error?.issues));
   });
 

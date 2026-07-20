@@ -17,6 +17,13 @@ export const insertUserSchema = createInsertSchema(users).pick({
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
+export const contributorAliasSchema = z.object({
+  name: z.string(),
+  email: z.string().optional(),
+  source: z.enum(["git", "azure"]),
+  commits: z.number(),
+});
+
 export const contributorSchema = z.object({
   name: z.string(),
   commits: z.number(),
@@ -30,6 +37,14 @@ export const contributorSchema = z.object({
   avgPrMergeTimeHours: z.number().optional(),
   longestStreak: z.number().optional(), // consecutive days with commits
   favoriteHour: z.number().optional(), // 0-23, hour with most commits
+  // Identity model (all optional for backward compatibility with old saved wraps):
+  email: z.string().optional(), // git author email (lowercased)
+  uniqueName: z.string().optional(), // Azure DevOps unique name / UPN (lowercased)
+  source: z.enum(["git", "azure", "mixed"]).optional(),
+  isUnmappedGit: z.boolean().optional(), // a git identity with no matching Azure account
+  bugsResolved: z.number().optional(), // bugs currently Resolved+ (see notes)
+  bugsValidated: z.number().optional(), // bugs currently Done/Closed
+  aliases: z.array(contributorAliasSchema).optional(), // identities merged into this person
 });
 
 export const moduleSchema = z.object({
@@ -140,7 +155,59 @@ export const wrappedMetaSchema = z.object({
     .optional(),
   definitions: z.array(z.string()).optional(), // human-readable KPI definitions
   notes: z.array(z.string()).optional(), // caveats and known limitations
+  // Import completeness: says whether the source data was fully fetched, and
+  // (in plain language) what may be missing when it was not.
+  completeness: z
+    .object({
+      status: z.enum(["complete", "partial", "failed", "unknown"]),
+      warnings: z.array(z.string()),
+      repositories: z
+        .object({
+          found: z.number(),
+          commitFetchFailed: z.number(),
+          pullRequestFetchFailed: z.number(),
+        })
+        .optional(),
+      workItems: z
+        .object({
+          idsFound: z.number(),
+          detailsFetched: z.number(),
+          detailBatchesFailed: z.number(),
+        })
+        .optional(),
+      // Which repositories failed and a short, PAT-safe reason (dev diagnostics).
+      commitFailures: z.array(z.object({ repo: z.string(), reason: z.string() })).optional(),
+      pullRequestFailures: z.array(z.object({ repo: z.string(), reason: z.string() })).optional(),
+    })
+    .optional(),
 });
+
+// Wrapped configuration: controls what data is included and what is shown, so a
+// recap can be tailored before presenting it to the team. Serializable to JSON,
+// versioned (so it can evolve), and never holds secrets/tokens/credentials.
+// `repositories` is applied at IMPORT time (it changes what is fetched); the rest
+// are applied at view time over the already-generated data.
+export const wrappedConfigSchema = z.object({
+  configVersion: z.number(),
+  showStoryPoints: z.boolean(),
+  hiddenMetrics: z.array(z.string()), // stat-card ids hidden on "The Numbers"
+  hiddenSlides: z.array(z.string()), // slide ids hidden from the recap
+  contributorSelection: z.object({
+    mode: z.enum(["all", "include", "exclude"]),
+    names: z.array(z.string()),
+  }),
+  repositories: z.array(z.string()), // repos to include at import; [] = all
+  // User-confirmed identity merges: each canonical (Azure) contributor plus the
+  // alias contributor names that belong to the same person.
+  identityAssociations: z.array(
+    z.object({
+      canonicalName: z.string(),
+      aliasNames: z.array(z.string()),
+    })
+  ),
+});
+
+export type WrappedConfig = z.infer<typeof wrappedConfigSchema>;
 
 export const projectWrappedDataSchema = z.object({
   projectName: z.string(),
@@ -164,6 +231,7 @@ export const projectWrappedDataSchema = z.object({
 });
 
 export type Contributor = z.infer<typeof contributorSchema>;
+export type ContributorAlias = z.infer<typeof contributorAliasSchema>;
 export type Module = z.infer<typeof moduleSchema>;
 export type RepositoryStats = z.infer<typeof repositoryStatsSchema>;
 export type ActivityPattern = z.infer<typeof activityPatternSchema>;

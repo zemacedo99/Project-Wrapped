@@ -110,10 +110,27 @@ export async function fetchGitHubData(config: GitHubConfig): Promise<ProjectWrap
     sprintsCompleted: Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)),
   };
 
+  // Completeness: the GitHub fetch is capped by paging limits, so flag when a
+  // cap was likely hit and history may be truncated.
+  const completenessWarnings: string[] = [];
+  if (commits.length >= 1000) {
+    completenessWarnings.push("Commit history hit the 1,000-commit fetch limit; older commits may be missing.");
+  }
+  if (pullRequests.length >= 500) {
+    completenessWarnings.push("Pull request history hit the 500-PR fetch limit; older PRs may be missing.");
+  }
+  if (issues.length >= 500) {
+    completenessWarnings.push("Issue history hit the 500-issue fetch limit; older issues may be missing.");
+  }
+
   const meta = {
     source: "GitHub",
     generatedAt: new Date().toISOString(),
     project: `${config.owner}/${config.repo}`,
+    completeness: {
+      status: completenessWarnings.length > 0 ? ("partial" as const) : ("complete" as const),
+      warnings: completenessWarnings,
+    },
     filters: {
       dateFrom,
       dateTo,

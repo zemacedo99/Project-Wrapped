@@ -5,6 +5,7 @@ import { Rocket, Bug, Flame, Target, Trophy, Star, Zap, Shield, CheckCircle, Awa
 interface HighlightsSlideProps {
   highlights: string[];
   funFacts?: string[];
+  showStoryPoints?: boolean;
 }
 
 function getHighlightIcon(index: number) {
@@ -52,10 +53,15 @@ function getGradientByIndex(index: number) {
   return gradients[index % gradients.length];
 }
 
-export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) {
+export function HighlightsSlide({ highlights, funFacts, showStoryPoints = false }: HighlightsSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.2 });
 
-  if (highlights.length === 0 && (!funFacts || funFacts.length === 0)) return null;
+  // Drop the story-points highlight when story points are turned off.
+  const visibleHighlights = showStoryPoints
+    ? highlights
+    : highlights.filter(h => !/story points/i.test(h));
+
+  if (visibleHighlights.length === 0 && (!funFacts || funFacts.length === 0)) return null;
 
   return (
     <section
@@ -69,7 +75,7 @@ export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) 
 
       <div className="relative z-10 max-w-5xl mx-auto w-full">
         {/* Highlights Section */}
-        {highlights.length > 0 && (
+        {visibleHighlights.length > 0 && (
           <>
             <div
               className={`text-center mb-12 transition-all duration-700 ${
@@ -88,7 +94,7 @@ export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) 
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-16">
-              {highlights.map((highlight, index) => {
+              {visibleHighlights.map((highlight, index) => {
                 const gradient = getGradientByIndex(index);
                 return (
                   <Card
@@ -123,7 +129,7 @@ export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) 
               className={`text-center mb-12 transition-all duration-700 ${
                 isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
               }`}
-              style={{ transitionDelay: `${highlights.length * 100 + 200}ms` }}
+              style={{ transitionDelay: `${visibleHighlights.length * 100 + 200}ms` }}
             >
               <div className="flex items-center justify-center gap-3 mb-4">
                 <Lightbulb className="w-8 h-8 text-chart-4" />
@@ -138,7 +144,7 @@ export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) 
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {funFacts.map((fact, index) => {
-                const gradient = getGradientByIndex(index + highlights.length);
+                const gradient = getGradientByIndex(index + visibleHighlights.length);
                 return (
                   <Card
                     key={`funfact-${index}`}
@@ -146,7 +152,7 @@ export function HighlightsSlide({ highlights, funFacts }: HighlightsSlideProps) 
                     className={`relative p-5 bg-card/30 backdrop-blur-sm border-white/5 overflow-visible transition-all duration-700 hover:bg-card/50 ${
                       isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
                     }`}
-                    style={{ transitionDelay: `${(highlights.length + index) * 100 + 300}ms` }}
+                    style={{ transitionDelay: `${(visibleHighlights.length + index) * 100 + 300}ms` }}
                   >
                     <div className="flex items-center gap-4">
                       <div

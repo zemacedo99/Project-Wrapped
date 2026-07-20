@@ -1,5 +1,5 @@
 import https from "https";
-import type { ProjectWrappedData, Contributor, Module, Milestone, Top5, RepositoryStats, ActivityPattern } from "@shared/schema";
+import type { ProjectWrappedData, Contributor, ContributorAlias, Module, Milestone, Top5, RepositoryStats, ActivityPattern } from "@shared/schema";
 
 interface AzureDevOpsConfig {
   organization: string;
@@ -9,6 +9,11 @@ interface AzureDevOpsConfig {
   repositoryId?: string;
   dateFrom?: string;
   dateTo?: string;
+  // Import-time repository selection: when non-empty, only these repositories (by
+  // name) are fetched, so every repo-derived metric is computed from exactly this
+  // set. Empty/undefined = all repositories. (Work items are project-scoped in
+  // Azure DevOps and are not affected by this selection.)
+  repositories?: string[];
 }
 
 export interface AzureDevOpsCommit {
@@ -33,12 +38,14 @@ export interface AzureDevOpsPullRequest {
   status: string;
   createdBy: {
     displayName: string;
+    uniqueName?: string;
   };
   closedDate?: string;
   creationDate: string;
   reviewers?: Array<{
     displayName: string;
     vote: number;
+    uniqueName?: string;
   }>;
   repository?: {
     id: string;
@@ -54,6 +61,7 @@ export interface AzureDevOpsWorkItem {
     "System.State": string;
     "System.AssignedTo"?: {
       displayName: string;
+      uniqueName?: string;
     };
     "Microsoft.VSTS.Scheduling.StoryPoints"?: number;
     "System.CreatedDate": string;
@@ -177,6 +185,150 @@ async function fetchAzureDevOps<T>(
   return response.json();
 }
 
+// ---------------------------------------------------------------------------
+// Import completeness tracking
+// Records where data could NOT be fetched so the recap can tell the user when
+// the numbers may be incomplete, instead of presenting partial data as whole.
+// Only counts and short human-readable messages are ever kept here — never raw
+// error objects, response bodies, tokens or other secrets.
+// ---------------------------------------------------------------------------
+
+export interface RepoFailure {
+  repo: string;
+  reason: string;
+}
+
+export interface ImportCompleteness {
+  repositoryListFailed: boolean; // the /git/repositories call itself failed
+  repositoriesFound: number; // repos returned by the list
+  commitReposFailed: number; // repos whose commit paging threw
+  pullRequestReposFailed: number; // repos whose PR paging threw
+  commitsCategoryFailed: boolean; // the whole commit fetch rejected
+  pullRequestsCategoryFailed: boolean; // the whole PR fetch rejected
+  workItemsCategoryFailed: boolean; // the whole work-item fetch rejected (e.g. WIQL failed)
+  workItemIdsFound: number; // work item ids discovered via WIQL
+  workItemDetailsFetched: number; // work items whose details we actually loaded
+  workItemDetailBatchesFailed: number; // detail batches that failed and were skipped
+  commitFailures: RepoFailure[]; // per-repo commit failure diagnostics
+  pullRequestFailures: RepoFailure[]; // per-repo PR failure diagnostics
+}
+
+export function newCompleteness(): ImportCompleteness {
+  return {
+    repositoryListFailed: false,
+    repositoriesFound: 0,
+    commitReposFailed: 0,
+    pullRequestReposFailed: 0,
+    commitsCategoryFailed: false,
+    pullRequestsCategoryFailed: false,
+    workItemsCategoryFailed: false,
+    workItemIdsFound: 0,
+    workItemDetailsFetched: 0,
+    workItemDetailBatchesFailed: 0,
+    commitFailures: [],
+    pullRequestFailures: [],
+  };
+}
+
+// Turn an error into a short, safe reason string. Auth material is never present
+// in these messages (the PAT lives in a header), but we scrub defensively anyway
+// and keep only the first line, truncated.
+export function sanitizeFailureReason(error: unknown): string {
+  let msg = error instanceof Error && error.message ? error.message : String(error);
+  msg = msg
+    .replace(/Basic\s+[A-Za-z0-9+/=]+/g, "Basic ***")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
+  return msg.split("\n")[0].trim().slice(0, 200);
+}
+
+export interface CompletenessSummary {
+  status: "complete" | "partial" | "failed";
+  warnings: string[];
+  repositories: { found: number; commitFetchFailed: number; pullRequestFetchFailed: number };
+  workItems: { idsFound: number; detailsFetched: number; detailBatchesFailed: number };
+  commitFailures: RepoFailure[];
+  pullRequestFailures: RepoFailure[];
+}
+
+// Turn the raw tracker into a saved, user-facing summary: an overall status and
+// plain-language warnings that say what is missing and which numbers it affects.
+export function summarizeCompleteness(c: ImportCompleteness): CompletenessSummary {
+  const warnings: string[] = [];
+
+  if (c.repositoryListFailed) {
+    warnings.push("Could not list repositories — most commit and pull request data is likely missing.");
+  } else if (c.repositoriesFound === 0) {
+    warnings.push("No repositories were returned for this project, so commit, pull request and repository metrics are empty.");
+  }
+
+  if (c.commitsCategoryFailed) {
+    warnings.push("Commit data could not be fetched — commit counts, streaks and activity patterns are missing.");
+  } else if (c.commitReposFailed > 0) {
+    warnings.push(
+      `Commits could not be read from ${c.commitReposFailed} of ${c.repositoriesFound} repositories, so commit-based numbers are undercounted.`
+    );
+  }
+
+  if (c.pullRequestsCategoryFailed) {
+    warnings.push("Pull request data could not be fetched — PR, review and merge-time metrics are missing.");
+  } else if (c.pullRequestReposFailed > 0) {
+    warnings.push(
+      `Pull requests could not be read from ${c.pullRequestReposFailed} of ${c.repositoriesFound} repositories, so PR and review numbers are undercounted.`
+    );
+  }
+
+  if (c.workItemsCategoryFailed) {
+    warnings.push("Work item data could not be fetched — bug, story-point and work-area metrics are missing.");
+  } else {
+    const missing = Math.max(0, c.workItemIdsFound - c.workItemDetailsFetched);
+    if (c.workItemDetailBatchesFailed > 0 || missing > 0) {
+      warnings.push(
+        `${missing.toLocaleString()} of ${c.workItemIdsFound.toLocaleString()} work items could not be loaded and are excluded, so bug and story-point numbers are undercounted.`
+      );
+    }
+  }
+
+  const everythingFailed =
+    c.commitsCategoryFailed && c.pullRequestsCategoryFailed && c.workItemsCategoryFailed;
+
+  let status: CompletenessSummary["status"];
+  if (c.repositoryListFailed || everythingFailed) {
+    status = "failed";
+  } else if (warnings.length > 0) {
+    status = "partial";
+  } else {
+    status = "complete";
+  }
+
+  return {
+    status,
+    warnings,
+    repositories: {
+      found: c.repositoriesFound,
+      commitFetchFailed: c.commitReposFailed,
+      pullRequestFetchFailed: c.pullRequestReposFailed,
+    },
+    workItems: {
+      idsFound: c.workItemIdsFound,
+      detailsFetched: c.workItemDetailsFetched,
+      detailBatchesFailed: c.workItemDetailBatchesFailed,
+    },
+    commitFailures: c.commitFailures,
+    pullRequestFailures: c.pullRequestFailures,
+  };
+}
+
+// Import-time repository selection. Empty selection (or no valid names) = include
+// all repositories; otherwise keep only the repositories whose name was selected.
+// This is what makes repository filtering accurate: the returned set is the only
+// one whose commits/PRs are fetched, so every repo-derived number reflects it.
+export function selectRepositories<T extends { name: string }>(all: T[], selected: string[]): T[] {
+  const wanted = selected.filter(n => n && n.trim());
+  if (wanted.length === 0) return all;
+  const set = new Set(wanted);
+  return all.filter(r => set.has(r.name));
+}
+
 export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<ProjectWrappedData> {
   const dateFrom = config.dateFrom;
   const dateTo = config.dateTo;
@@ -188,16 +340,76 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     console.log(`[Azure DevOps] Fetching all commits (no date filter)`);
   }
 
-  // Fetch repositories first to get repo-level stats
-  const repositories = await fetchRepositories(config);
+  // Track import completeness so partial data is never presented as whole.
+  const tracker = newCompleteness();
 
-  const [commits, pullRequests, workItems] = await Promise.all([
-    fetchCommits(config, repositories, dateFrom, dateTo),
-    fetchPullRequests(config, repositories, dateFrom, dateTo),
-    fetchWorkItems(config, dateFrom, dateTo),
+  // Fetch repositories (for repo-level stats) and iterations (for real sprints).
+  const [allRepositories, iterations] = await Promise.all([
+    fetchRepositories(config, tracker),
+    fetchIterations(config),
   ]);
 
+  // Apply the import-time repository selection: only fetch commits/PRs for the
+  // selected repositories so every repo-derived number is genuinely accurate.
+  const selected = config.repositories?.filter(n => n && n.trim()) ?? [];
+  const repositories = selectRepositories(allRepositories, selected);
+  const repositoryFilterApplied = selected.length > 0 && repositories.length !== allRepositories.length;
+  if (repositoryFilterApplied) {
+    console.log(`[Azure DevOps] Repository filter: ${repositories.length} of ${allRepositories.length} repositories selected`);
+  }
+  // Reflect the *selected* repositories in the completeness repo count.
+  tracker.repositoriesFound = repositories.length;
+
+  // Fetch each category independently: a failure in one (e.g. work items) should
+  // still yield a partial recap with a clear warning, not a blank 500 error.
+  const [commitsRes, prsRes, workItemsRes] = await Promise.allSettled([
+    fetchCommits(config, repositories, dateFrom, dateTo, tracker),
+    fetchPullRequests(config, repositories, dateFrom, dateTo, tracker),
+    fetchWorkItems(config, dateFrom, dateTo, tracker),
+  ]);
+
+  let commits: AzureDevOpsCommit[] = [];
+  if (commitsRes.status === "fulfilled") {
+    commits = commitsRes.value;
+  } else {
+    tracker.commitsCategoryFailed = true;
+    console.error("[Azure DevOps] Commit fetch failed entirely:", commitsRes.reason);
+  }
+
+  let pullRequests: AzureDevOpsPullRequest[] = [];
+  if (prsRes.status === "fulfilled") {
+    pullRequests = prsRes.value;
+  } else {
+    tracker.pullRequestsCategoryFailed = true;
+    console.error("[Azure DevOps] Pull request fetch failed entirely:", prsRes.reason);
+  }
+
+  let workItems: AzureDevOpsWorkItem[] = [];
+  if (workItemsRes.status === "fulfilled") {
+    workItems = workItemsRes.value;
+  } else {
+    tracker.workItemsCategoryFailed = true;
+    console.error("[Azure DevOps] Work item fetch failed entirely:", workItemsRes.reason);
+  }
+
   console.log(`[Azure DevOps] Fetched: ${commits.length} commits, ${pullRequests.length} PRs, ${workItems.length} work items`);
+
+  // If the import produced no usable data *because of failures*, surface the error
+  // loudly (500 → error toast) instead of saving an empty recap that a partial-data
+  // banner cannot rescue. A genuinely empty project (no failures) still proceeds.
+  if (commits.length === 0 && pullRequests.length === 0 && workItems.length === 0) {
+    const hadFailure =
+      tracker.repositoryListFailed ||
+      tracker.commitsCategoryFailed ||
+      tracker.pullRequestsCategoryFailed ||
+      tracker.workItemsCategoryFailed;
+    if (hadFailure) {
+      const summary = summarizeCompleteness(tracker);
+      throw new Error(
+        `Azure DevOps import failed — no data could be retrieved. ${summary.warnings.join(" ")}`
+      );
+    }
+  }
 
   // Calculate enhanced stats
   const prMergeStats = calculatePrMergeStats(pullRequests);
@@ -206,7 +418,11 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
   const repoStats = aggregateRepositoryStats(commits, pullRequests, repositories);
   const workItemBreakdown = aggregateWorkItemTypes(workItems);
 
-  const contributorStats = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData);
+  // Aggregate per raw identity, then merge into canonical people so the same
+  // human isn't split across git/Azure identities. Every contributor-based
+  // section (Champions, Top 5, Team) is computed from this one canonical set.
+  const rawContributors = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData);
+  const contributorStats = canonicalizeContributors(rawContributors);
   const moduleStats = aggregateModuleStats(workItems);
   const top5 = calculateTop5(contributorStats, commits, streakData);
   const highlights = generateHighlights(commits, pullRequests, workItems, activityPattern);
@@ -228,7 +444,11 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     totalComments: 0,
     totalBugsFixed: workItems.filter(isBugFixed).length,
     totalStoryPointsDone: workItems.reduce((acc, wi) => acc + completedStoryPoints(wi), 0),
-    sprintsCompleted: dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0,
+    // Prefer real Azure DevOps iterations overlapping the range; fall back to a
+    // two-week estimate only when iterations aren't available.
+    sprintsCompleted: iterations.length > 0
+      ? countIterationsInRange(iterations, dateFrom, dateTo)
+      : (dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0),
     totalRepositories: repositories.length,
     avgPrMergeTimeHours: prMergeStats.avgMergeTimeHours,
     fastestPrMergeTimeHours: prMergeStats.fastestMergeTimeHours,
@@ -286,18 +506,29 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
       repositories: repositories.length,
     },
     definitions: [
-      `Bugs fixed: work items of type "Bug" in a completed state (${DONE_STATES_LABEL}).`,
+      `Work items counted: every work item type (Tasks included), in any state, filtered by created date (System.CreatedDate) when a date range is set, scoped to this project. Repository selection does not change work items — they are project-scoped in Azure DevOps.`,
+      `Bugs fixed: work items of type "Bug" in a completed state (${DONE_STATES_LABEL}) — based on current state, not on who resolved vs. validated them.`,
       `Story points: sum of Story Points on work items in a completed state (${DONE_STATES_LABEL}).`,
       "Code reviews: reviewers who cast a vote (approved, approved w/ suggestions, waiting or rejected) on a PR.",
       "PR merge rate: completed PRs ÷ all PRs in range.",
       "Longest streak: most consecutive calendar days with at least one commit, per author.",
+      "Work Areas: grouped by the leaf of each work item's Area Path; commits and PRs cannot be attributed to an area path, so only work-item counts are shown there.",
     ],
     notes: [
+      ...(repositoryFilterApplied
+        ? [
+            `This recap includes only ${repositories.length} of ${allRepositories.length} repositories, selected at import — commit, pull request and repository metrics reflect only those. Work items are project-scoped in Azure DevOps and are not affected by repository selection.`,
+          ]
+        : []),
       "PR discussion comments and lines-added/deleted are not collected — scanning every PR thread at project scale is too slow, so those metrics are intentionally omitted rather than shown partially.",
-      "Contributors from commits are identified by git author name; contributors from PRs and work items by their Azure DevOps display name. If a person's git name differs from their display name they may appear more than once.",
+      "Contributors are unified into one person per Azure DevOps account by matching email / unique name, then exact display name. Commits from linked git identities are summed into that person; git identities with no Azure match are shown separately and can be linked manually in Settings → Contributors.",
+      "Bug 'resolved by developer' vs 'validated by tester' needs work item history (who moved the state), which is not fetched yet — bug counts reflect the current state only and are attributed to the current assignee.",
       "Activity hours (busiest hour, night owl / early bird) are computed in the server's local timezone.",
-      "Sprints completed is estimated from the date range assuming a two-week cadence, not read from Azure DevOps iterations.",
+      iterations.length > 0
+        ? `Sprints completed = the ${totalStats.sprintsCompleted} Azure DevOps iteration(s) overlapping the selected range (real iterations, not an estimate).`
+        : "Sprints completed is estimated from the date range assuming a two-week cadence — real Azure DevOps iterations could not be read for this project.",
     ],
+    completeness: summarizeCompleteness(tracker),
   };
 
   return {
@@ -323,17 +554,75 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 }
 
 // Helper function to fetch repositories
-async function fetchRepositories(config: AzureDevOpsConfig): Promise<Array<{ id: string; name: string }>> {
+async function fetchRepositories(
+  config: AzureDevOpsConfig,
+  tracker?: ImportCompleteness
+): Promise<Array<{ id: string; name: string }>> {
   try {
     const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
       config,
       "/git/repositories"
     );
-    return reposResponse.value || [];
+    const repos = reposResponse.value || [];
+    if (tracker) tracker.repositoriesFound = repos.length;
+    return repos;
   } catch (error) {
     console.warn("[Azure DevOps] Failed to fetch repositories:", error);
+    if (tracker) tracker.repositoryListFailed = true;
     return [];
   }
+}
+
+interface AzureIterationNode {
+  name: string;
+  attributes?: { startDate?: string; finishDate?: string };
+  children?: AzureIterationNode[];
+}
+
+// Fetch the project's iteration (sprint) tree. Uses the project-level
+// classification nodes API, so no team context is required. Returns dated
+// iterations flattened from the tree; on any failure returns [] (non-fatal).
+async function fetchIterations(
+  config: AzureDevOpsConfig
+): Promise<Array<{ name: string; startDate?: string; finishDate?: string }>> {
+  try {
+    const root = await fetchAzureDevOps<AzureIterationNode>(
+      config,
+      "/wit/classificationnodes/iterations?$depth=10"
+    );
+    const out: Array<{ name: string; startDate?: string; finishDate?: string }> = [];
+    const walk = (node: AzureIterationNode) => {
+      const startDate = node.attributes?.startDate;
+      const finishDate = node.attributes?.finishDate;
+      if (startDate || finishDate) out.push({ name: node.name, startDate, finishDate });
+      for (const child of node.children || []) walk(child);
+    };
+    walk(root);
+    console.log(`[Azure DevOps] Found ${out.length} dated iterations`);
+    return out;
+  } catch (error) {
+    console.warn("[Azure DevOps] Failed to fetch iterations (falling back to estimate):", error);
+    return [];
+  }
+}
+
+// Count iterations that overlap [from, to]. With no range, counts all dated
+// iterations. An iteration overlaps when it starts on/before the window end and
+// finishes on/after the window start.
+export function countIterationsInRange(
+  iterations: Array<{ startDate?: string; finishDate?: string }>,
+  from?: string,
+  to?: string
+): number {
+  return iterations.filter(it => {
+    if (!it.startDate && !it.finishDate) return false;
+    if (!from && !to) return true;
+    const start = it.startDate ? new Date(it.startDate).getTime() : -Infinity;
+    const finish = it.finishDate ? new Date(it.finishDate).getTime() : Infinity;
+    const lo = from ? new Date(from).getTime() : -Infinity;
+    const hi = to ? new Date(to).getTime() + 24 * 60 * 60 * 1000 - 1 : Infinity;
+    return start <= hi && finish >= lo;
+  }).length;
 }
 
 // Calculate PR merge time statistics
@@ -533,7 +822,8 @@ async function fetchCommits(
   config: AzureDevOpsConfig,
   repositories: Array<{ id: string; name: string }>,
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  tracker?: ImportCompleteness
 ): Promise<AzureDevOpsCommit[]> {
   try {
     console.log(`[Azure DevOps] Fetching commits from ${repositories.length} repositories...`);
@@ -541,9 +831,9 @@ async function fetchCommits(
     const pageSize = 1000;
 
     for (const repo of repositories) {
+      let repoCommitCount = 0;
       try {
         let skip = 0;
-        let repoCommitCount = 0;
 
         // Page through every commit in the repo using $skip until a short page is returned.
         while (true) {
@@ -570,6 +860,13 @@ async function fetchCommits(
         console.log(`[Azure DevOps] ${repo.name}: ${repoCommitCount} commits`);
       } catch (error) {
         console.warn(`[Azure DevOps] Failed to fetch commits for repo ${repo.name}:`, error);
+        if (tracker) {
+          tracker.commitReposFailed++;
+          const base = sanitizeFailureReason(error);
+          // Note when some commits were read before the failure (partial, not total).
+          const reason = repoCommitCount > 0 ? `${base} (after reading ${repoCommitCount} commits)` : base;
+          tracker.commitFailures.push({ repo: repo.name, reason });
+        }
       }
     }
 
@@ -585,7 +882,8 @@ async function fetchPullRequests(
   config: AzureDevOpsConfig,
   repositories: Array<{ id: string; name: string }>,
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  tracker?: ImportCompleteness
 ): Promise<AzureDevOpsPullRequest[]> {
   try {
     console.log(`[Azure DevOps] Fetching pull requests from ${repositories.length} repositories...`);
@@ -593,9 +891,9 @@ async function fetchPullRequests(
     const pageSize = 1000;
 
     for (const repo of repositories) {
+      let repoPrCount = 0;
       try {
         let skip = 0;
-        let repoPrCount = 0;
 
         // Page through every PR (any status) in the repo using $skip.
         while (true) {
@@ -619,6 +917,12 @@ async function fetchPullRequests(
         console.log(`[Azure DevOps] ${repo.name}: ${repoPrCount} pull requests`);
       } catch (error) {
         console.warn(`[Azure DevOps] Failed to fetch PRs for repo ${repo.name}:`, error);
+        if (tracker) {
+          tracker.pullRequestReposFailed++;
+          const base = sanitizeFailureReason(error);
+          const reason = repoPrCount > 0 ? `${base} (after reading ${repoPrCount} PRs)` : base;
+          tracker.pullRequestFailures.push({ repo: repo.name, reason });
+        }
       }
     }
 
@@ -645,7 +949,8 @@ async function fetchPullRequests(
 async function fetchWorkItems(
   config: AzureDevOpsConfig,
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  tracker?: ImportCompleteness
 ): Promise<AzureDevOpsWorkItem[]> {
   // A single WIQL query returns at most 20,000 rows. To retrieve every work item in a large
   // project we page by an ascending [System.Id] watermark, asking for the next chunk of IDs
@@ -702,6 +1007,7 @@ async function fetchWorkItems(
     }
 
     console.log(`[Azure DevOps] Found ${allWorkItemIds.length} work items total`);
+    if (tracker) tracker.workItemIdsFound = allWorkItemIds.length;
 
     if (allWorkItemIds.length === 0) {
       return [];
@@ -732,6 +1038,7 @@ async function fetchWorkItems(
             return detailsData.value || [];
           } catch {
             console.warn(`[Azure DevOps] Error fetching work item batch ${batchNumber}, skipping it`);
+            if (tracker) tracker.workItemDetailBatchesFailed++;
             return [] as AzureDevOpsWorkItem[];
           }
         })
@@ -743,6 +1050,7 @@ async function fetchWorkItems(
     }
 
     console.log(`[Azure DevOps] Fetched details for ${workItems.length} work items out of ${allWorkItemIds.length}`);
+    if (tracker) tracker.workItemDetailsFetched = workItems.length;
     return workItems;
   } catch (error) {
     console.error("[Azure DevOps] Failed to fetch work items:", error);
@@ -762,8 +1070,9 @@ export function aggregateContributorStats(
   // Track commit hours for favorite hour calculation
   const commitHoursByAuthor = new Map<string, number[]>();
 
-  for (const commit of commits) {
-    const name = commit.author?.name?.trim() || "Unknown";
+  const norm = (s?: string) => (s ? s.trim().toLowerCase() : undefined);
+
+  function ensure(name: string): Contributor {
     if (!contributorMap.has(name)) {
       contributorMap.set(name, {
         name,
@@ -781,8 +1090,21 @@ export function aggregateContributorStats(
       });
       commitHoursByAuthor.set(name, new Array(24).fill(0));
     }
-    contributorMap.get(name)!.commits++;
-    
+    return contributorMap.get(name)!;
+  }
+
+  // Record which identity space a row was seen in (commits = git, PRs/work items = azure).
+  function markSource(c: Contributor, s: "git" | "azure") {
+    c.source = !c.source ? s : c.source === s ? s : "mixed";
+  }
+
+  for (const commit of commits) {
+    const name = commit.author?.name?.trim() || "Unknown";
+    const c = ensure(name);
+    c.commits++;
+    if (!c.email && commit.author?.email) c.email = norm(commit.author.email);
+    markSource(c, "git");
+
     // Track commit hour
     const hour = new Date(commit.author.date).getHours();
     commitHoursByAuthor.get(name)![hour]++;
@@ -790,78 +1112,35 @@ export function aggregateContributorStats(
 
   for (const pr of pullRequests) {
     const name = pr.createdBy?.displayName?.trim() || "Unknown";
-    if (!contributorMap.has(name)) {
-      contributorMap.set(name, {
-        name,
-        commits: 0,
-        pullRequestsOpened: 0,
-        pullRequestsReviewed: 0,
-        commentsWritten: 0,
-        bugsFixed: 0,
-        storyPointsDone: 0,
-        linesAdded: 0,
-        linesDeleted: 0,
-        avgPrMergeTimeHours: 0,
-        longestStreak: 0,
-        favoriteHour: 0,
-      });
-      commitHoursByAuthor.set(name, new Array(24).fill(0));
-    }
-    contributorMap.get(name)!.pullRequestsOpened++;
+    const c = ensure(name);
+    c.pullRequestsOpened++;
+    if (!c.uniqueName && pr.createdBy?.uniqueName) c.uniqueName = norm(pr.createdBy.uniqueName);
+    markSource(c, "azure");
 
     for (const reviewer of pr.reviewers || []) {
       // Only count reviewers who actually cast a vote (approve/reject/waiting), matching the
       // project-level "reviews" metric. Assigned-but-inactive reviewers are ignored.
       if (reviewer.vote === 0) continue;
       const reviewerName = reviewer.displayName?.trim() || "Unknown";
-      if (!contributorMap.has(reviewerName)) {
-        contributorMap.set(reviewerName, {
-          name: reviewerName,
-          commits: 0,
-          pullRequestsOpened: 0,
-          pullRequestsReviewed: 0,
-          commentsWritten: 0,
-          bugsFixed: 0,
-          storyPointsDone: 0,
-          linesAdded: 0,
-          linesDeleted: 0,
-          avgPrMergeTimeHours: 0,
-          longestStreak: 0,
-          favoriteHour: 0,
-        });
-        commitHoursByAuthor.set(reviewerName, new Array(24).fill(0));
-      }
-      contributorMap.get(reviewerName)!.pullRequestsReviewed++;
+      const rc = ensure(reviewerName);
+      rc.pullRequestsReviewed++;
+      if (!rc.uniqueName && reviewer.uniqueName) rc.uniqueName = norm(reviewer.uniqueName);
+      markSource(rc, "azure");
     }
   }
 
   for (const wi of workItems) {
-    const assignee = wi.fields["System.AssignedTo"]?.displayName?.trim();
+    const at = wi.fields["System.AssignedTo"];
+    const assignee = at?.displayName?.trim();
     if (!assignee) continue;
 
     // Include people who only have work items assigned (no commits/PRs) so the roster is complete.
-    if (!contributorMap.has(assignee)) {
-      contributorMap.set(assignee, {
-        name: assignee,
-        commits: 0,
-        pullRequestsOpened: 0,
-        pullRequestsReviewed: 0,
-        commentsWritten: 0,
-        bugsFixed: 0,
-        storyPointsDone: 0,
-        linesAdded: 0,
-        linesDeleted: 0,
-        avgPrMergeTimeHours: 0,
-        longestStreak: 0,
-        favoriteHour: 0,
-      });
-      commitHoursByAuthor.set(assignee, new Array(24).fill(0));
-    }
+    const c = ensure(assignee);
+    if (!c.uniqueName && at?.uniqueName) c.uniqueName = norm(at.uniqueName);
+    markSource(c, "azure");
 
-    if (isBugFixed(wi)) {
-      contributorMap.get(assignee)!.bugsFixed++;
-    }
-    contributorMap.get(assignee)!.storyPointsDone += completedStoryPoints(wi);
+    if (isBugFixed(wi)) c.bugsFixed++;
+    c.storyPointsDone += completedStoryPoints(wi);
   }
 
   // Add PR merge time and streak data
@@ -885,6 +1164,90 @@ export function aggregateContributorStats(
   // Return every contributor (sorted by commits). Champions/Top 5 take their own slices,
   // and the Contributors slide shows the full roster of people who worked on the project.
   return Array.from(contributorMap.values())
+    .sort((a, b) => b.commits - a.commits);
+}
+
+// Merge a group of raw identities into one canonical person: sum the metrics,
+// prefer an Azure identity as the label, and keep the individual identities as
+// aliases (with their own commit counts) for the details view.
+function mergePeople(members: Contributor[]): Contributor {
+  const sum = (k: keyof Contributor) => members.reduce((n, m) => n + ((m[k] as number) || 0), 0);
+  const hasAzure = members.some(m => m.source === "azure" || m.source === "mixed");
+  const hasGit = members.some(m => m.source === "git" || m.source === "mixed");
+  const byCommitsDesc = [...members].sort((a, b) => b.commits - a.commits);
+  // Prefer an Azure-backed identity as the canonical label; else the top committer.
+  const primary =
+    byCommitsDesc.find(m => m.source === "azure" || m.source === "mixed") || byCommitsDesc[0];
+
+  const aliases: ContributorAlias[] = byCommitsDesc.map(m => ({
+    name: m.name,
+    email: m.email ?? m.uniqueName,
+    source: m.source === "git" ? "git" : "azure",
+    commits: m.commits,
+  }));
+
+  return {
+    name: primary.name,
+    commits: sum("commits"),
+    pullRequestsOpened: sum("pullRequestsOpened"),
+    pullRequestsReviewed: sum("pullRequestsReviewed"),
+    commentsWritten: sum("commentsWritten"),
+    bugsFixed: sum("bugsFixed"),
+    storyPointsDone: sum("storyPointsDone"),
+    linesAdded: sum("linesAdded"),
+    linesDeleted: sum("linesDeleted"),
+    avgPrMergeTimeHours: primary.avgPrMergeTimeHours,
+    longestStreak: Math.max(...members.map(m => m.longestStreak || 0)),
+    favoriteHour: primary.favoriteHour,
+    email: primary.email ?? members.find(m => m.email)?.email,
+    uniqueName: primary.uniqueName ?? members.find(m => m.uniqueName)?.uniqueName,
+    source: hasAzure && hasGit ? "mixed" : hasAzure ? "azure" : "git",
+    isUnmappedGit: !hasAzure,
+    aliases: members.length > 1 ? aliases : undefined,
+  };
+}
+
+// Auto-merge raw per-name contributor rows into canonical people so the same
+// human never appears as several rows. Matching rules (safe, non-fuzzy):
+//   1. shared email / uniqueName  (a git author email == an Azure UPN)
+//   2. identical normalized display name
+// User-confirmed manual associations are applied later, client-side, on top.
+export function canonicalizeContributors(rows: Contributor[]): Contributor[] {
+  const parent = rows.map((_, i) => i);
+  const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+
+  // Rule 1: link by any shared email-like identifier (email OR uniqueName).
+  const byEmail = new Map<string, number>();
+  rows.forEach((r, i) => {
+    for (const id of [r.email, r.uniqueName]) {
+      if (!id) continue;
+      if (byEmail.has(id)) union(byEmail.get(id)!, i);
+      else byEmail.set(id, i);
+    }
+  });
+
+  // Rule 2: link by identical normalized display name.
+  const byName = new Map<string, number>();
+  rows.forEach((r, i) => {
+    const key = r.name.trim().toLowerCase();
+    if (byName.has(key)) union(byName.get(key)!, i);
+    else byName.set(key, i);
+  });
+
+  const groups = new Map<number, Contributor[]>();
+  rows.forEach((r, i) => {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(r);
+  });
+
+  return Array.from(groups.values())
+    .map(mergePeople)
     .sort((a, b) => b.commits - a.commits);
 }
 

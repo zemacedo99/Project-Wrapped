@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect, useMemo, Fragment, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, Link } from "wouter";
-import type { ProjectWrappedData } from "@shared/schema";
+import type { ProjectWrappedData, WrappedConfig } from "@shared/schema";
 import { IntroSlide } from "@/components/slides/intro-slide";
 import { GlobalStatsSlide } from "@/components/slides/global-stats-slide";
 import { ChampionsSlide } from "@/components/slides/champions-slide";
@@ -12,36 +12,20 @@ import { TimelineSlide } from "@/components/slides/timeline-slide";
 import { HighlightsSlide } from "@/components/slides/highlights-slide";
 import { OutroSlide } from "@/components/slides/outro-slide";
 import { NavigationDots, useActiveSection, scrollToSection } from "@/components/navigation-dots";
+import { WrappedSettings } from "@/components/wrapped-settings";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Home, Share2, Download, Image, FileText, Loader2 } from "lucide-react";
+import { Home, Share2, Download, Image, FileText, Loader2, Settings } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DEFAULT_CONFIG,
+  applyConfig,
+  normalizeConfig,
+  reconcileConfig,
+  serializeConfig,
+} from "@/lib/wrapped-config";
 import html2canvas from "html2canvas";
-
-const sectionIds = [
-  "slide-intro",
-  "slide-global-stats",
-  "slide-champions",
-  "slide-contributors",
-  "slide-top5",
-  "slide-modules",
-  "slide-timeline",
-  "slide-highlights",
-  "slide-outro",
-];
-
-const sectionNames = [
-  "Intro",
-  "Stats",
-  "Champions",
-  "Team",
-  "Top 5",
-  "Modules",
-  "Timeline",
-  "Highlights",
-  "Outro",
-];
 
 function LoadingState() {
   return (
@@ -91,6 +75,8 @@ export default function ProjectWrapped() {
   const wrappedId = params.id;
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [config, setConfig] = useState<WrappedConfig>(DEFAULT_CONFIG);
 
   const { data, isLoading, error } = useQuery<ProjectWrappedData>({
     queryKey: ["/api/wrapped", wrappedId],
@@ -105,53 +91,146 @@ export default function ProjectWrapped() {
     enabled: !!wrappedId,
   });
 
+  // Load any persisted config once the data is available, reconciling it against
+  // this recap's repositories/contributors (dropping unknown items).
+  useEffect(() => {
+    if (!data) return;
+    let raw: unknown;
+    try {
+      const stored = localStorage.getItem(`wrapped-config:${wrappedId}`);
+      raw = stored ? JSON.parse(stored) : undefined;
+    } catch {
+      raw = undefined;
+    }
+    const { config: norm } = normalizeConfig(raw);
+    const { config: rec } = reconcileConfig(norm, {
+      repoNames: data.meta?.repositoriesIncluded ?? [],
+      contributorNames: data.contributors.map((c) => c.name),
+    });
+    setConfig(rec);
+  }, [data, wrappedId]);
+
+  const updateConfig = (next: WrappedConfig) => {
+    setConfig(next);
+    try {
+      localStorage.setItem(`wrapped-config:${wrappedId}`, serializeConfig(next));
+    } catch {
+      // localStorage may be unavailable (private mode); config still applies in-memory.
+    }
+  };
+
+  const derived = useMemo(() => (data ? applyConfig(data, config) : null), [data, config]);
+
+  // Build the visible slide list, honouring hidden sections and skipping slides
+  // that would render nothing (so navigation dots always match what's on screen).
+  const visibleSlides = useMemo<Array<{ testid: string; name: string; node: ReactNode }>>(() => {
+    if (!data || !derived) return [];
+    const contribCount = derived.contributors.length;
+    const nonSpHighlights = derived.showStoryPoints
+      ? data.highlights
+      : data.highlights.filter((h) => !/story points/i.test(h));
+    const showHighlights = nonSpHighlights.length > 0 || (data.funFacts?.length ?? 0) > 0;
+    const hidden = derived.hiddenSlides;
+
+    const all = [
+      { testid: "slide-intro", name: "Intro", include: true, node: <IntroSlide data={data} /> },
+      {
+        testid: "slide-global-stats",
+        name: "Stats",
+        include: true,
+        node: (
+          <GlobalStatsSlide
+            stats={data.stats}
+            meta={data.meta}
+            dateRange={data.dateRange}
+            showStoryPoints={derived.showStoryPoints}
+            hiddenMetrics={derived.hiddenMetrics}
+            contributorFilter={{
+              active: derived.contributorFilterActive,
+              shown: derived.contributors.length,
+              total: data.contributors.length,
+            }}
+            workItemBreakdown={data.workItemBreakdown}
+          />
+        ),
+      },
+      {
+        testid: "slide-champions",
+        name: "Champions",
+        include: !hidden.has("champions") && contribCount > 0,
+        node: <ChampionsSlide contributors={derived.contributors} />,
+      },
+      {
+        testid: "slide-contributors",
+        name: "Team",
+        include: !hidden.has("contributors") && contribCount > 0,
+        node: <ContributorsSlide contributors={derived.contributors} showStoryPoints={derived.showStoryPoints} />,
+      },
+      {
+        testid: "slide-top5",
+        name: "Top 5",
+        include: !hidden.has("top5"),
+        node: <Top5Slide top5={derived.top5} />,
+      },
+      {
+        testid: "slide-modules",
+        name: "Modules",
+        include: !hidden.has("modules") && data.modules.length > 0,
+        node: <ModulesSlide modules={data.modules} showStoryPoints={derived.showStoryPoints} />,
+      },
+      {
+        testid: "slide-timeline",
+        name: "Timeline",
+        include: !hidden.has("timeline"),
+        node: (
+          <TimelineSlide
+            milestones={data.milestones}
+            dateRange={data.dateRange}
+            sprintsCompleted={data.stats.sprintsCompleted}
+          />
+        ),
+      },
+      {
+        testid: "slide-highlights",
+        name: "Highlights",
+        include: !hidden.has("highlights") && showHighlights,
+        node: <HighlightsSlide highlights={data.highlights} funFacts={data.funFacts} showStoryPoints={derived.showStoryPoints} />,
+      },
+      { testid: "slide-outro", name: "Outro", include: true, node: <OutroSlide data={data} /> },
+    ];
+
+    return all.filter((s) => s.include).map(({ testid, name, node }) => ({ testid, name, node }));
+  }, [data, derived]);
+
+  const sectionIds = visibleSlides.map((s) => s.testid);
+  const sectionNames = visibleSlides.map((s) => s.name);
   const activeSection = useActiveSection(sectionIds);
 
   const handleShare = async () => {
     const shareUrl = window.location.href;
     try {
       await navigator.clipboard.writeText(shareUrl);
-      toast({
-        title: "Link copied!",
-        description: "Share this link with your team",
-      });
+      toast({ title: "Link copied!", description: "Share this link with your team" });
     } catch {
-      toast({
-        title: "Copy failed",
-        description: "Please copy the URL manually",
-        variant: "destructive",
-      });
+      toast({ title: "Copy failed", description: "Please copy the URL manually", variant: "destructive" });
     }
   };
 
   const handleExportCurrentSlide = async () => {
     if (!data) return;
     setIsExporting(true);
-    
     try {
       const currentSlideId = sectionIds[activeSection];
       const slideElement = document.querySelector(`[data-testid="${currentSlideId}"]`) as HTMLElement | null;
-      
-      if (!slideElement) {
-        throw new Error("Could not find current slide");
-      }
+      if (!slideElement) throw new Error("Could not find current slide");
 
-      const canvas = await html2canvas(slideElement, {
-        backgroundColor: null,
-        scale: 2,
-        logging: false,
-        useCORS: true,
-      });
-
+      const canvas = await html2canvas(slideElement, { backgroundColor: null, scale: 2, logging: false, useCORS: true });
       const link = document.createElement("a");
-      link.download = `${data.projectName.replace(/[^a-z0-9]/gi, '-')}-${sectionNames[activeSection]}.png`;
+      link.download = `${data.projectName.replace(/[^a-z0-9]/gi, "-")}-${sectionNames[activeSection]}.png`;
       link.href = canvas.toDataURL("image/png");
       link.click();
 
-      toast({
-        title: "Image exported!",
-        description: `${sectionNames[activeSection]} slide saved as PNG`,
-      });
+      toast({ title: "Image exported!", description: `${sectionNames[activeSection]} slide saved as PNG` });
       setShowExportDialog(false);
     } catch (err) {
       toast({
@@ -167,37 +246,24 @@ export default function ProjectWrapped() {
   const handleExportAllSlides = async () => {
     if (!data) return;
     setIsExporting(true);
-    
     try {
       let exportedCount = 0;
       for (let i = 0; i < sectionIds.length; i++) {
         const slideElement = document.querySelector(`[data-testid="${sectionIds[i]}"]`) as HTMLElement | null;
         if (!slideElement) continue;
 
-        const canvas = await html2canvas(slideElement, {
-          backgroundColor: null,
-          scale: 2,
-          logging: false,
-          useCORS: true,
-        });
-
+        const canvas = await html2canvas(slideElement, { backgroundColor: null, scale: 2, logging: false, useCORS: true });
         const link = document.createElement("a");
-        link.download = `${data.projectName.replace(/[^a-z0-9]/gi, '-')}-${String(i + 1).padStart(2, '0')}-${sectionNames[i]}.png`;
+        link.download = `${data.projectName.replace(/[^a-z0-9]/gi, "-")}-${String(i + 1).padStart(2, "0")}-${sectionNames[i]}.png`;
         link.href = canvas.toDataURL("image/png");
         link.click();
         exportedCount++;
-
-        await new Promise(resolve => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
 
-      if (exportedCount === 0) {
-        throw new Error("No slides could be exported");
-      }
+      if (exportedCount === 0) throw new Error("No slides could be exported");
 
-      toast({
-        title: "Slides exported!",
-        description: `${exportedCount} images saved as PNG files`,
-      });
+      toast({ title: "Slides exported!", description: `${exportedCount} images saved as PNG files` });
       setShowExportDialog(false);
     } catch (err) {
       toast({
@@ -215,17 +281,9 @@ export default function ProjectWrapped() {
     setShowExportDialog(false);
   };
 
-  if (isLoading) {
-    return <LoadingState />;
-  }
-
-  if (error) {
-    return <ErrorState error={error as Error} />;
-  }
-
-  if (!data) {
-    return <ErrorState error={new Error("No data available")} />;
-  }
+  if (isLoading) return <LoadingState />;
+  if (error) return <ErrorState error={error as Error} />;
+  if (!data) return <ErrorState error={new Error("No data available")} />;
 
   return (
     <div className="min-h-screen bg-background text-foreground scroll-smooth" data-testid="project-wrapped">
@@ -235,6 +293,9 @@ export default function ProjectWrapped() {
             <Home className="w-4 h-4" />
           </Button>
         </Link>
+        <Button size="icon" variant="outline" onClick={() => setShowSettings(true)} data-testid="button-settings">
+          <Settings className="w-4 h-4" />
+        </Button>
         <Button size="icon" variant="outline" onClick={handleShare} data-testid="button-share">
           <Share2 className="w-4 h-4" />
         </Button>
@@ -243,6 +304,14 @@ export default function ProjectWrapped() {
         </Button>
       </div>
 
+      <WrappedSettings
+        open={showSettings}
+        onOpenChange={setShowSettings}
+        data={data}
+        config={config}
+        onConfigChange={updateConfig}
+      />
+
       <Dialog open={showExportDialog} onOpenChange={setShowExportDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -250,9 +319,7 @@ export default function ProjectWrapped() {
               <Download className="w-5 h-5" />
               Export Wrapped
             </DialogTitle>
-            <DialogDescription>
-              Choose how you'd like to export your Project Wrapped
-            </DialogDescription>
+            <DialogDescription>Choose how you'd like to export your Project Wrapped</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-4">
             <Button
@@ -262,11 +329,7 @@ export default function ProjectWrapped() {
               disabled={isExporting}
               data-testid="button-export-current"
             >
-              {isExporting ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                <Image className="w-5 h-5" />
-              )}
+              {isExporting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Image className="w-5 h-5" />}
               <div className="text-left">
                 <div className="font-medium">Export Current Slide</div>
                 <div className="text-xs text-muted-foreground">Save "{sectionNames[activeSection]}" as PNG image</div>
@@ -279,11 +342,7 @@ export default function ProjectWrapped() {
               disabled={isExporting}
               data-testid="button-export-all"
             >
-              {isExporting ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                <Image className="w-5 h-5" />
-              )}
+              {isExporting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Image className="w-5 h-5" />}
               <div className="text-left">
                 <div className="font-medium">Export All Slides</div>
                 <div className="text-xs text-muted-foreground">Download all {sectionIds.length} slides as PNG images</div>
@@ -312,19 +371,9 @@ export default function ProjectWrapped() {
         onDotClick={(index) => scrollToSection(index, sectionIds)}
       />
 
-      <IntroSlide data={data} />
-      <GlobalStatsSlide stats={data.stats} meta={data.meta} dateRange={data.dateRange} />
-      <ChampionsSlide contributors={data.contributors} />
-      <ContributorsSlide contributors={data.contributors} />
-      <Top5Slide top5={data.top5} />
-      <ModulesSlide modules={data.modules} />
-      <TimelineSlide
-        milestones={data.milestones}
-        dateRange={data.dateRange}
-        sprintsCompleted={data.stats.sprintsCompleted}
-      />
-      <HighlightsSlide highlights={data.highlights} funFacts={data.funFacts} />
-      <OutroSlide data={data} />
+      {visibleSlides.map((s) => (
+        <Fragment key={s.testid}>{s.node}</Fragment>
+      ))}
     </div>
   );
 }

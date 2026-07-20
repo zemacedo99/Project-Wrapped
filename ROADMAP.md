@@ -31,6 +31,11 @@ PRs, work items → aggregation) → `saveWrapped` (Postgres) →
 **Slides:** Intro → Global Stats → Champions → Team → Top 5 → Modules → Timeline →
 Highlights/Fun Facts → Outro.
 
+**Configuration (P1.9).** A versioned `WrappedConfig` tailors the recap: Story Points are
+off by default, repositories are selected at import time (accurately changing the numbers),
+and contributors can be filtered for the people sections. Settings live in a side panel with
+JSON export/import; see [wrapped-config.ts](client/src/lib/wrapped-config.ts).
+
 ### What already works well
 - **Robust ingestion.** Commits and PRs page through `$top`/`$skip`; work items use an
    id-watermark WIQL loop to get past the 20k row cap, then batched detail fetches with
@@ -75,14 +80,25 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
 
 ## 3. P0 — Critical for correctness
 
-### P0.1 — Unify contributor identity across commits, PRs and work items
+### P0.1 — Unify contributor identity across commits, PRs and work items ✅ DONE
 - **Goal:** One person = one contributor row, regardless of source.
-- **Why it matters:** Commits key on the git `author.name`; PRs and work items key on the
-  Azure DevOps `displayName`. When those differ, the same human appears as two
-  contributors — inflating "N people made this happen", splitting the Champions and Top 5,
-  and undermining every per-person number. This is the single biggest remaining accuracy
-  risk for a team-facing recap.
-- **Approach:**
+- **What was implemented:**
+  - Commit rows now capture `author.email`; PR/reviewer/work-item rows capture Azure
+    `uniqueName`; each row records its `source` (git / azure / mixed).
+  - `canonicalizeContributors()` auto-merges rows by (1) shared email/uniqueName then
+    (2) exact normalized display name, preferring the Azure display name as the label and
+    summing metrics into aliases (per-alias commit counts kept). Runs server-side so
+    Champions, Top 5 and Team all use the one canonical set — fixing the Commit-Champion vs
+    Top-Contributors mismatch.
+  - Git identities with no Azure match are flagged `isUnmappedGit` and shown separately.
+  - **User-confirmed manual associations** (`config.identityAssociations`) merge remaining
+    git aliases into a person in Settings → Contributors; applied client-side in
+    `applyConfig` and exported/imported with the config. No silent fuzzy matching.
+  - Tested: email match, normalized-name match, unmapped git, summed commits, no duplicate
+    rows, and Champion == Top after merge (both backend + client layers).
+- **Remaining:** cross-project identity, and richer suggestion of *likely* matches (currently
+  only auto-merges exact signals; everything else is manual).
+- **Original approach notes:**
   - Prefer identity resolution by email: commits expose `author.email`; enrich PR/work-item
     identities with `uniqueName`/email from the Azure DevOps Identity/Graph fields
     (`createdBy.uniqueName`, `assignedTo` `uniqueName`).
@@ -95,17 +111,29 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
   as `John Doe`, the output contains a single contributor with combined commits + PRs.
   The team count equals distinct resolved identities.
 
-### P0.2 — Surface partial-fetch / data-completeness warnings
+### P0.2 — Surface partial-fetch / data-completeness warnings ✅ DONE
 - **Goal:** Never let a partially-fetched wrap look complete.
-- **Why it matters:** Failed repositories, failed work-item batches, and permission gaps
-  are currently swallowed (`catch { skip }`). The recap still renders, silently missing
-  data, which directly violates "numbers must be accurate and traceable".
-- **Approach:** Thread a `warnings: string[]` (and counters like `reposFailed`,
-  `workItemBatchesFailed`, `workItemIdsFound` vs `workItemsFetched`) through the fetch
-  layer into `meta`. Render a visible banner in the provenance panel when non-empty
-  (e.g. "⚠ 2 of 14 repositories could not be read — numbers may be incomplete").
-- **Acceptance criteria:** Simulating a failing repo/batch produces a `meta.warnings`
-  entry and a visible warning in the UI; a fully successful fetch shows none.
+- **Why it mattered:** Failed repositories, failed work-item batches, and permission gaps
+  were swallowed (`catch { skip }`). The recap still rendered, silently missing data.
+- **What was implemented:**
+  - An `ImportCompleteness` tracker threaded through `fetchRepositories`, `fetchCommits`,
+    `fetchPullRequests` and `fetchWorkItems`, plus `summarizeCompleteness()` which derives
+    an overall status (`complete` / `partial` / `failed`) and plain-language warnings that
+    name *what* is missing and *which numbers* it affects.
+  - Category fetches now run via `Promise.allSettled`, so a total failure of one category
+    (e.g. PRs or work items) yields a **partial** recap with a warning instead of a 500.
+  - The summary is saved on `meta.completeness` (counts only — no raw errors or tokens).
+  - The provenance panel shows a **visible banner** (no expand needed) for partial/failed
+    imports, a status pill in the header, and a positive confirmation when complete.
+  - GitHub reports a minimal completeness (flags when a paging cap was hit).
+  - Old wraps without `meta.completeness` remain valid (schema optional; UI treats them as
+    `unknown` and shows nothing).
+- **Acceptance criteria (met):** unit tests prove a failing repo/PR-category/work-item-batch
+  and a no-repositories result each produce clear warnings and a non-`complete` status,
+  while a clean import produces `complete` with no warnings.
+- **Deliberately deferred (see P1.8):** field-level completeness (e.g. "% of work items
+  without story points / area path"). This pass covers *fetch* failures — the actual trust
+  blocker — not per-field sparsity.
 
 ### P0.3 — Make time-boxed metrics filter on the right date
 - **Goal:** A recap for a period reflects work *done in that period*.
@@ -178,14 +206,13 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
 ## 4. P1 — Important for usability
 
 ### P1.1 — Read real sprints/iterations from Azure DevOps
-- **Goal:** Replace the estimated sprint count with actual completed iterations.
-- **Why it matters:** `sprintsCompleted` is `dateRange ÷ 2 weeks` — an assumption. Teams
-  will notice when it disagrees with their board.
-- **Approach:** Query `/work/teamsettings/iterations` (needs a team context) or derive
-  distinct `System.IterationPath` values with past end dates. Fall back to the estimate
-  only when iterations are unavailable, and label which was used in `meta`.
-- **Acceptance criteria:** For a project with defined iterations, the count matches the
-  number of past iterations; the estimate is used only as a labelled fallback.
+- **Goal:** Replace the estimated sprint count with actual completed iterations. ✅ DONE
+- **What was implemented:** `fetchIterations()` reads the project-level classification-nodes
+  iterations tree (`/wit/classificationnodes/iterations?$depth=10`) — no team context needed —
+  and `countIterationsInRange()` counts iterations overlapping the selected date range.
+  `sprintsCompleted` uses this real count when iterations exist and falls back to the two-week
+  estimate otherwise; the provenance note states which was used. Tested (`countIterationsInRange`).
+- **Remaining:** show real sprint *names* on the Timeline (currently a count only).
 
 ### P1.2 — Add repository name to commits so per-repo stats populate
 - **Goal:** Populate the already-computed repository leaderboard.
@@ -212,25 +239,37 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
   as human dates.
 - **Acceptance criteria:** Top 5 busiest days appear with correct commit counts and dates.
 
-### P1.5 — Clarify the "Modules" concept
+### P1.5 — Clarify the "Modules" concept ✅ DONE (partial)
 - **Goal:** Stop implying modules are code areas.
-- **Why it matters:** Modules are derived from work-item **Area Paths**, and
-  `commits`/`pullRequests` per module are always 0. The header "Where the work happened
-  across the codebase" is misleading.
-- **Approach:** Rename to "Areas" / "Work Areas", update copy, and make
-  `commits`/`pullRequests` optional in `moduleSchema` (or drop them) to remove dead fields.
-- **Acceptance criteria:** Slide copy references area paths; no always-zero fields remain
-  in the module type.
+- **What was implemented:** the slide is renamed **"Work Areas"** with the subtitle
+  "Grouped by work item Area Path — not code modules or repositories", and a provenance
+  definition explains that grouping is by the leaf of `System.AreaPath` and that commits/PRs
+  can't be attributed to an area. The area-grouping logic is covered by `aggregateModuleStats`
+  tests.
+- **Remaining:** the always-zero `commits`/`pullRequests` fields still exist on `moduleSchema`
+  (kept for backward compatibility); drop them in a future cleanup.
 
-### P1.6 — Regression tests for the aggregation layer
+### P1.6 — Regression tests for the aggregation layer ✅ DONE (extend as new logic lands)
 - **Goal:** Lock in metric definitions.
-- **Why it matters:** There are no tests; accuracy fixes can silently regress. This is the
-  cheapest insurance for the product's core promise.
-- **Approach:** Add Vitest with fixtures of raw Azure commits/PRs/work items and assert on
-  `fetchAzureDevOpsData`'s aggregation (done-state handling, story-point crediting, PR
-  date scoping, identity merging). Add an `npm test` script.
-- **Acceptance criteria:** `npm test` runs in CI-like fashion and covers each P0 metric
-  definition with at least one fixture.
+- **What was implemented:** a zero-dependency harness using Node's built-in test runner via
+  `tsx` (`npm test` → `node --import tsx --test server/services/azure-devops.test.ts`), with
+  fixtures covering done-state handling, story-point crediting, bug counting, PR date
+  scoping, contributor/module aggregation, PR merge-time, top-5, the completeness model, and
+  schema backward-compatibility.
+- **Remaining:** add fixtures as P0.1 (identity) and P0.3/P0.7 (date axis) land; consider a
+  second test file + CI wiring (the `test` script currently names one file explicitly).
+
+### P1.8 — Field-level completeness (data sparsity)
+- **Goal:** Warn when imported items are systematically missing key fields.
+- **Why it matters:** P0.2 covers *fetch* failures; it does not flag when, say, 90% of work
+  items have no Story Points or no Area Path — which would quietly make story-point and
+  work-area numbers meaningless even though the import "succeeded".
+- **Approach:** During work-item aggregation, count items missing `StoryPoints`, `AreaPath`,
+  `State` or `AssignedTo`; if a field is absent on a high proportion of items, add an
+  informational `meta.completeness` warning (kept out of the alarming red/amber banner
+  unless severe).
+- **Acceptance criteria:** A fixture where most work items lack story points produces an
+  informational note; a fully-populated set produces none.
 
 ### P1.7 — Progress feedback during long fetches
 - **Goal:** Tell the user what's happening on large projects.
@@ -241,6 +280,78 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
   org/project/range to avoid refetching.
 - **Acceptance criteria:** The connect flow shows incremental progress and a time estimate
   for a large project.
+
+### P1.9 — Configuration & Settings (Story Points off by default, repo/contributor filtering, export/import) ✅ DONE
+- **Goal:** Let the recap be tailored before it's shown to the team.
+- **What was implemented:**
+  - A versioned, JSON-serializable `WrappedConfig` (`configVersion: 1`) in
+    [shared/schema.ts](shared/schema.ts): `showStoryPoints`, `hiddenMetrics`, `hiddenSlides`,
+    `contributorSelection {mode, names}`, `repositories`. No secrets/tokens are ever stored.
+  - **Story Points hidden by default** — gated across The Numbers, Contributors, Modules,
+    Highlights and the provenance definitions; the existing (tested) story-point *logic* is
+    untouched and re-enabled by the "Show Story Points" switch.
+  - **Repository filtering is import-time** (`selectRepositories` in the Azure fetch): only
+    the selected repos are fetched, so commit/PR/repository numbers are genuinely accurate.
+    The Azure import dialog gained an all/none/search repository picker.
+  - **Contributor filtering** (view-time): a Settings picker with search, sort
+    (commits/PRs/reviews/bugs/name, + story points when enabled), activity filters, and
+    include/exclude modes. Recomputes the Team, Hall of Fame and Top Contributors sections
+    from the stored `contributors[]` and rebuilds the leaderboards.
+  - **Settings panel** ([wrapped-settings.tsx](client/src/components/wrapped-settings.tsx)):
+    a side sheet with display toggles, section visibility, the contributor picker, repository
+    info, and config **download/upload** (validated + reconciled against the recap, unknown
+    repos/contributors dropped with a warning, never crashes on bad JSON/old versions).
+  - Config persists per-wrap in `localStorage` and is applied at view time
+    ([wrapped-config.ts](client/src/lib/wrapped-config.ts)).
+  - Provenance panel now lists **active filters** and states plainly that repository scope is
+    reflected in the numbers while contributor filtering affects people sections only (project
+    totals stay whole-project). P0.2 completeness warnings are untouched.
+- **Limitations / follow-ups (see P1.10):**
+  - Repository filtering is **import-time only** — you cannot re-scope an existing wrap by
+    repo without regenerating (raw per-repo data isn't stored). Work items are project-scoped
+    in Azure DevOps and are never affected by repo selection (documented in-panel).
+  - Contributor filtering intentionally does **not** change aggregate project totals (commits,
+    PRs, bugs, points on The Numbers) — only the people-oriented sections — to avoid implying
+    a re-aggregated project total that the stored data can't support accurately.
+  - Config lives in `localStorage` + exportable JSON; it is not persisted server-side with the
+    wrap.
+
+### P1.10 — Post-hoc, fully-accurate re-aggregation from selected repos/contributors
+- **Goal:** Let repository (and total-affecting contributor) filtering re-scope an *existing*
+  wrap without regenerating.
+- **Why it matters:** Today repo scope is fixed at import; changing it needs a new import.
+- **Approach:** Persist a normalized, compact per-commit / per-PR dataset (author, repo, date,
+  vote) alongside the aggregates, and recompute stats client- or server-side when filters
+  change. Note this still cannot repo-scope work items (project-scoped in Azure DevOps).
+- **Acceptance criteria:** Changing the repository selection on a saved wrap updates
+  commit/PR/review/contributor numbers accurately, with work-item metrics clearly marked as
+  project-wide.
+
+### P1.11 — Bug "resolved by developer" vs "validated by tester" (needs work item history)
+- **Goal:** Separate metrics for who *resolved* a bug (moved it to Resolved) and who
+  *validated* it (moved it to Done), plus a resolver-based "Bug Slayer" and a validator stat.
+- **Why it matters:** Current `bugsFixed` uses the bug's *current state* and credits the
+  *current assignee* — which does not prove who changed the state. Crediting the assignee as
+  the resolver would be an assumption (explicitly disallowed), so this is deferred until the
+  data supports it. The limitation is stated in the provenance panel today.
+- **Approach:** Use the Work Item **Updates/Revisions API** (`/wit/workItems/{id}/updates`),
+  **only for Bugs**, to find the person who set `System.State` to Resolved and to Done.
+  Make it an **opt-in** step (it's one request per bug), cache the result with the wrap, and
+  show a clear "history not fetched" state when disabled. Schema already carries optional
+  `bugsResolved`/`bugsValidated` fields for this.
+- **Acceptance criteria:** With history enabled, each bug's resolver and validator are read
+  from its state-change history (never assumed); resolver/validator leaderboards use those.
+
+### P1.12 — Staged import progress + skip disabled work
+- **Goal:** Faster, clearer imports (see reported slow 1-repo import).
+- **Why it matters:** Even with one repo selected, work items are project-scoped so the WIQL
+  + detail fetch dominates; the UI only shows a spinner.
+- **Approach:** Stream per-stage progress (repos → commits → PRs → work items → iterations)
+  via SSE/polling; state plainly that work items are project-scoped; skip fetches whose
+  output is entirely hidden by config (e.g. don't fetch work items if every work-item-derived
+  section is disabled); only fetch bug history (P1.11) when those metrics are enabled.
+- **Acceptance criteria:** The connect flow shows stage-by-stage progress; disabling all
+  work-item sections measurably reduces import time; accuracy is unchanged.
 
 ---
 
@@ -312,10 +423,10 @@ Documented here (and, where user-facing, in the in-app provenance panel):
 
 ## 7. Suggested sequencing
 
-1. **P0.1 identity** and **P0.2 warnings** — the two biggest trust risks.
+1. **P0.2 warnings** ✅ done and **P0.1 identity** (next) — the two biggest trust risks.
 2. **P0.3 date axis**, **P0.6 window consistency**, **P0.7 PR date basis** and **P0.4
    timezone** — correctness of time-boxed and activity stats.
-3. **P1.6 tests** — lock the definitions in before building more on top.
+3. **P1.6 tests** ✅ harness in place — extend as the above land.
 4. **P1.1–P1.5** — real sprints, then surface the already-computed repos / work-item
    breakdown / busiest days, and relabel Modules.
 5. **P2** — heatmap, trends, watch-next, presentation mode, sharing, GitHub parity.

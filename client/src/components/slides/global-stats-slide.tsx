@@ -10,6 +10,10 @@ interface GlobalStatsSlideProps {
   stats: ProjectStats;
   meta?: WrappedMeta;
   dateRange: { start: string; end: string };
+  showStoryPoints?: boolean;
+  hiddenMetrics?: Set<string>;
+  contributorFilter?: { active: boolean; shown: number; total: number };
+  workItemBreakdown?: Record<string, number>;
 }
 
 interface StatCardProps {
@@ -71,11 +75,12 @@ function StatCard({ icon, label, value, delay, isVisible, gradient, suffix }: St
   );
 }
 
-export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlideProps) {
+export function GlobalStatsSlide({ stats, meta, dateRange, showStoryPoints = false, hiddenMetrics, contributorFilter, workItemBreakdown }: GlobalStatsSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.2 });
 
   // Filter to show only stats with meaningful values
   const allStatCards: Array<{
+    id: string;
     icon: React.ReactNode;
     label: string;
     value: number;
@@ -83,42 +88,49 @@ export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlidePro
     suffix?: string;
   }> = [
     {
+      id: "commits",
       icon: <GitCommit className="w-6 h-6 text-primary" />,
       label: "Total Commits",
       value: stats.totalCommits,
       gradient: "primary",
     },
     {
+      id: "pullRequests",
       icon: <GitPullRequest className="w-6 h-6 text-accent" />,
       label: "Pull Requests",
       value: stats.totalPullRequests,
       gradient: "accent",
     },
     {
+      id: "reviews",
       icon: <Eye className="w-6 h-6 text-chart-3" />,
       label: "Code Reviews",
       value: stats.totalReviews,
       gradient: "chart-3",
     },
     {
+      id: "comments",
       icon: <MessageCircle className="w-6 h-6 text-chart-2" />,
       label: "Comments",
       value: stats.totalComments,
       gradient: "chart-2",
     },
     {
+      id: "filesChanged",
       icon: <FileCode className="w-6 h-6 text-chart-4" />,
       label: "Files Changed",
       value: stats.totalFilesChanged || 0,
       gradient: "chart-4",
     },
     {
+      id: "repositories",
       icon: <FolderGit className="w-6 h-6 text-primary" />,
       label: "Repositories",
       value: stats.totalRepositories || 0,
       gradient: "primary",
     },
     {
+      id: "longestStreak",
       icon: <Flame className="w-6 h-6 text-accent" />,
       label: "Longest Streak",
       value: stats.longestStreak || 0,
@@ -126,6 +138,7 @@ export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlidePro
       suffix: " days",
     },
     {
+      id: "avgPrMergeTime",
       icon: <Clock className="w-6 h-6 text-chart-3" />,
       label: "Avg PR Merge Time",
       value: stats.avgPrMergeTimeHours || 0,
@@ -133,12 +146,14 @@ export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlidePro
       suffix: "h",
     },
     {
+      id: "workItems",
       icon: <Zap className="w-6 h-6 text-chart-4" />,
       label: "Work Items",
       value: stats.totalWorkItems || 0,
       gradient: "chart-4",
     },
     {
+      id: "storyPoints",
       icon: <Target className="w-6 h-6 text-primary" />,
       label: "Story Points",
       value: stats.totalStoryPointsDone,
@@ -146,8 +161,13 @@ export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlidePro
     },
   ];
 
-  // Only show cards with values > 0
-  const statCards = allStatCards.filter(card => card.value > 0);
+  // Only show cards that have a value, aren't hidden, and (for story points) are enabled.
+  const statCards = allStatCards.filter(card => {
+    if (card.value <= 0) return false;
+    if (card.id === "storyPoints" && !showStoryPoints) return false;
+    if (hiddenMetrics?.has(card.id)) return false;
+    return true;
+  });
 
   return (
     <section
@@ -187,7 +207,13 @@ export function GlobalStatsSlide({ stats, meta, dateRange }: GlobalStatsSlidePro
           ))}
         </div>
 
-        <DataProvenance meta={meta} dateRange={dateRange} />
+        <DataProvenance
+          meta={meta}
+          dateRange={dateRange}
+          showStoryPoints={showStoryPoints}
+          contributorFilter={contributorFilter}
+          workItemBreakdown={workItemBreakdown}
+        />
       </div>
     </section>
   );

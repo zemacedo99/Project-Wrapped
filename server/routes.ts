@@ -86,7 +86,7 @@ export async function registerRoutes(
 
   app.post("/api/connect/azure-devops", async (req, res) => {
     try {
-      const { organization, project, personalAccessToken, baseUrl, dateFrom, dateTo } = req.body;
+      const { organization, project, personalAccessToken, baseUrl, dateFrom, dateTo, repositories } = req.body;
 
       const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
       if (validationErrors.length > 0) {
@@ -101,6 +101,8 @@ export async function registerRoutes(
         baseUrl,
         dateFrom,
         dateTo,
+        // Only accept an array of repository names; ignore anything else.
+        repositories: Array.isArray(repositories) ? repositories.filter((r: unknown) => typeof r === "string") : undefined,
       });
 
       const saved = await storage.saveWrapped(data);

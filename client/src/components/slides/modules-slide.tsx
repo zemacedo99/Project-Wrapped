@@ -6,6 +6,7 @@ import { Layers, Target, Flame, CheckCircle, AlertCircle, Clock, Bug, ClipboardL
 
 interface ModulesSlideProps {
   modules: Module[];
+  showStoryPoints?: boolean;
 }
 
 function getStatusConfig(status: string) {
@@ -48,9 +49,10 @@ interface ModuleCardProps {
   isMostActive: boolean;
   delay: number;
   isVisible: boolean;
+  showStoryPoints: boolean;
 }
 
-function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps) {
+function ModuleCard({ module, isMostActive, delay, isVisible, showStoryPoints }: ModuleCardProps) {
   const statusConfig = getStatusConfig(module.status);
   const testId = module.name.toLowerCase().replace(/\s+/g, "-");
 
@@ -84,7 +86,7 @@ function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps)
         </Badge>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className={`grid gap-4 ${showStoryPoints ? "grid-cols-3" : "grid-cols-2"}`}>
         <div className="text-center p-3 rounded-lg bg-white/5">
           <div className="flex items-center justify-center mb-1">
             <ClipboardList className="w-4 h-4 text-primary" />
@@ -92,13 +94,15 @@ function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps)
           <p className="text-2xl font-bold tabular-nums">{(module.workItems || 0).toLocaleString()}</p>
           <p className="text-xs text-muted-foreground">Work Items</p>
         </div>
-        <div className="text-center p-3 rounded-lg bg-white/5">
-          <div className="flex items-center justify-center mb-1">
-            <Target className="w-4 h-4 text-chart-2" />
+        {showStoryPoints && (
+          <div className="text-center p-3 rounded-lg bg-white/5">
+            <div className="flex items-center justify-center mb-1">
+              <Target className="w-4 h-4 text-chart-2" />
+            </div>
+            <p className="text-2xl font-bold tabular-nums">{module.storyPointsDone.toLocaleString()}</p>
+            <p className="text-xs text-muted-foreground">Points</p>
           </div>
-          <p className="text-2xl font-bold tabular-nums">{module.storyPointsDone.toLocaleString()}</p>
-          <p className="text-xs text-muted-foreground">Points</p>
-        </div>
+        )}
         <div className="text-center p-3 rounded-lg bg-white/5">
           <div className="flex items-center justify-center mb-1">
             {module.bugsFixed && module.bugsFixed > 0 ? (
@@ -124,7 +128,7 @@ function ModuleCard({ module, isMostActive, delay, isVisible }: ModuleCardProps)
   );
 }
 
-export function ModulesSlide({ modules }: ModulesSlideProps) {
+export function ModulesSlide({ modules, showStoryPoints = false }: ModulesSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.15 });
   const mostActiveModule = findMostActiveModule(modules);
 
@@ -147,11 +151,11 @@ export function ModulesSlide({ modules }: ModulesSlideProps) {
           <div className="flex items-center justify-center gap-3 mb-4">
             <Layers className="w-8 h-8 text-primary" />
             <h2 className="text-4xl md:text-5xl lg:text-6xl font-black">
-              Modules & Components
+              Work Areas
             </h2>
           </div>
           <p className="text-xl text-muted-foreground">
-            Where the work happened across the codebase
+            Grouped by work item Area Path — not code modules or repositories
           </p>
         </div>
 
@@ -163,6 +167,7 @@ export function ModulesSlide({ modules }: ModulesSlideProps) {
               isMostActive={mostActiveModule?.name === module.name}
               delay={index * 100}
               isVisible={isVisible}
+              showStoryPoints={showStoryPoints}
             />
           ))}
         </div>
