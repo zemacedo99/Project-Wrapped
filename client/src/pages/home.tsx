@@ -1,6 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useLocation } from "wouter";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +33,42 @@ export default function Home() {
 
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
+  // Non-secret Azure DevOps connection defaults for this deployment (see
+  // GET /api/config/azure-devops). The literal PAT is never part of this
+  // response - only whether one is configured server-side.
+  const azureConfigQuery = useQuery({
+    queryKey: ["/api/config/azure-devops"],
+    queryFn: async () => {
+      const response = await fetch("/api/config/azure-devops");
+      if (!response.ok) throw new Error("Failed to load Azure DevOps defaults");
+      return (await response.json()) as {
+        baseUrl: string;
+        organization: string;
+        project: string;
+        hasConfiguredPat: boolean;
+      };
+    },
+    staleTime: Infinity,
+    retry: false,
+  });
+  const hasConfiguredPat = azureConfigQuery.data?.hasConfiguredPat ?? false;
+
+  // Prefill the form from the environment defaults exactly once, the first
+  // time they become available - never overwrites values the user already
+  // typed (e.g. if they started editing before the request resolved).
+  const defaultsAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!azureConfigQuery.data || defaultsAppliedRef.current) return;
+    defaultsAppliedRef.current = true;
+    const defaults = azureConfigQuery.data;
+    setAzureForm((prev) => ({
+      ...prev,
+      baseUrl: prev.baseUrl || defaults.baseUrl,
+      organization: prev.organization || defaults.organization,
+      project: prev.project || defaults.project,
+    }));
+  }, [azureConfigQuery.data]);
 
   // Repository selection (import-time): the repos discovered by "Test Connection",
   // and the subset the user chooses to include. Only the selected repos are fetched.
@@ -79,7 +115,7 @@ export default function Home() {
   });
 
   const azureMutation = useMutation({
-    mutationFn: async (formData: typeof azureForm & { repositories?: string[] }) => {
+    mutationFn: async (formData: typeof azureForm & { useConfiguredPat?: boolean; repositories?: string[] }) => {
       const response = await fetch("/api/connect/azure-devops", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -170,7 +206,14 @@ export default function Home() {
     // selected we send [] to mean "all".
     const repositories =
       azureRepos.length > 0 && selectedRepos.length < azureRepos.length ? selectedRepos : [];
-    azureMutation.mutate({ ...azureForm, repositories });
+    azureMutation.mutate({
+      ...azureForm,
+      // Never sends the configured env PAT itself - only a flag telling the
+      // server to use it when the field was left blank (see resolvePat() in
+      // server/routes.ts).
+      useConfiguredPat: !azureForm.personalAccessToken && hasConfiguredPat,
+      repositories,
+    });
   };
 
   const handleTestAzureConnection = async () => {
@@ -185,6 +228,7 @@ export default function Home() {
           organization: azureForm.organization,
           project: azureForm.project,
           personalAccessToken: azureForm.personalAccessToken,
+          useConfiguredPat: !azureForm.personalAccessToken && hasConfiguredPat,
           baseUrl: azureForm.baseUrl || undefined,
         }),
       });
@@ -510,18 +554,25 @@ export default function Home() {
               <Input
                 id="azure-pat"
                 type="password"
-                placeholder="Enter your PAT"
+                placeholder={hasConfiguredPat ? "Using configured PAT (leave blank to use it)" : "Enter your PAT"}
                 value={azureForm.personalAccessToken}
                 onChange={(e) => {
                   setAzureForm({ ...azureForm, personalAccessToken: e.target.value });
                   setConnectionTestResult(null);
                 }}
-                required
+                required={!hasConfiguredPat}
                 data-testid="input-azure-pat"
               />
               <p className="text-xs text-muted-foreground">
                 Required scopes: Code (Read), Work Items (Read)
               </p>
+              {hasConfiguredPat && !azureForm.personalAccessToken && (
+                <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="text-configured-pat-warning">
+                  A Personal Access Token is configured for this deployment and will be used since this
+                  field is blank. It is shared by everyone using this deployment - type your own PAT
+                  above to use it for this connection instead.
+                </p>
+              )}
             </div>
             
             {connectionTestResult && (
@@ -553,7 +604,12 @@ export default function Home() {
               variant="outline" 
               className="w-full"
               onClick={handleTestAzureConnection}
-              disabled={isTestingConnection || !azureForm.organization || !azureForm.project || !azureForm.personalAccessToken}
+              disabled={
+                isTestingConnection ||
+                !azureForm.organization ||
+                !azureForm.project ||
+                (!azureForm.personalAccessToken && !hasConfiguredPat)
+              }
             >
               {isTestingConnection ? (
                 <>

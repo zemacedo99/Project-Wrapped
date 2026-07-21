@@ -65,13 +65,13 @@ cd Project-Wrapped
 ```
 
 That single command validates Docker, creates `.env` (with freshly generated
-local database credentials), builds and starts the database **and** the app
-in Docker, waits for both to become healthy, applies the database schema, and
-prints the URLs below. No manual `npm install`, migration, or extra Docker
-commands are needed.
+local database credentials), builds and starts the database, the app **and**
+a Caddy reverse proxy in Docker, waits for all three to become healthy,
+applies the database schema, and prints the URLs below. No manual
+`npm install`, migration, or extra Docker commands are needed.
 
-- **Open locally:** `http://localhost:5000`
-- **From another device on the same network (LAN):** `http://<this-computer's-LAN-IP>:5000` (printed by the script)
+- **Open locally:** `https://localhost` (you'll see a certificate warning the first time - see [HTTPS / internal CA](#https--internal-ca) below)
+- **From another device on the same network (LAN):** `https://<this-computer's-LAN-IP>` (printed by the script)
 - **Stop it:** `.\setup-and-start.ps1 -Stop` (data is preserved)
 - **Update after `git pull`:** just re-run `.\setup-and-start.ps1` (it rebuilds the image and reapplies the schema)
 - **Persistent data:** stored in the Docker named volume `project_wrapped_pgdata` — it survives `docker compose down` and computer restarts, and is only deleted by `-ResetDatabase`
@@ -96,11 +96,14 @@ There are three distinct ways to run this app - pick the one that matches what y
 .\setup-and-start.ps1
 ```
 
-Internally this runs `docker compose up -d --build`, which starts two
-containers: `db` (PostgreSQL) and `app` (the built, production-mode server).
-The script just adds prerequisite checks, `.env` bootstrapping, health-check
-waiting, and friendly status output — you can also run the plain Compose
-commands yourself once `.env` exists:
+Internally this runs `docker compose up -d --build`, which starts three
+containers: `db` (PostgreSQL), `app` (the built, production-mode server, not
+published to the host - only reachable from `caddy`), and `caddy` (reverse
+proxy terminating HTTPS on port 443 with an internal CA - see
+[HTTPS / internal CA](#https--internal-ca)). The script just adds
+prerequisite checks, `.env` bootstrapping, health-check waiting, and
+friendly status output — you can also run the plain Compose commands
+yourself once `.env` exists:
 
 ```bash
 git pull
@@ -128,12 +131,14 @@ See [Internet / production deployment](#internet--production-deployment) below f
 
 | PowerShell | Bash | Description |
 |---|---|---|
-| *(none)* | *(none)* | **Recommended.** Build/start database + app in Docker |
+| *(none)* | *(none)* | **Recommended.** Build/start database + app + Caddy (HTTPS) in Docker |
 | `-Dev` | `--dev` | Local development: DB in Docker, app on the host with hot reload (requires Node.js) |
 | `-Stop` | `--stop` | Stop the running containers (data preserved) |
 | `-ResetDatabase` | `--reset-database` | **Destructive.** Deletes the local database volume. Asks for confirmation unless `-Force` / `--force` is also given |
 | `-Force` | `--force` | Skips the confirmation prompt for `-ResetDatabase` |
 | `-SkipInstall` | `--skip-install` | `-Dev` only: skip `npm install` |
+| `-AdvertisedHost <ip>` | `--advertised-host <ip>` | Override the address shown in the printed "Network:" URL (e.g. when auto-detection picks a VPN/virtual adapter) |
+| `-HttpsPort <port>` | `--https-port <port>` | Host port Caddy publishes for HTTPS (default `443`). Use if `443` is already occupied - the script reports the owning process instead of silently picking another port |
 
 The scripts are idempotent: re-running them will not overwrite `.env`, reuse
 existing containers/volumes, and never delete data unless `-ResetDatabase`
@@ -168,14 +173,33 @@ scripts create it for you with secure generated credentials.
 | Variable | Group | Default | Description |
 |---|---|---|---|
 | `DATABASE_URL` | Required | — | PostgreSQL connection string used by the app and `drizzle-kit` |
-| `PORT` | Required | `5000` | Port the server listens on / Compose publishes |
+| `PORT` | Required | `5000` | Port the server listens on internally (not published to the host/LAN - only reachable from the `caddy` container) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Required | see `.env.example` | Configure the Docker Compose database container; keep in sync with `DATABASE_URL` |
 | `POSTGRES_PORT` | Optional | `5432` | Host port mapped to the database container (bound to `127.0.0.1` only) |
 | `HOST` | Optional | `0.0.0.0` | Interface the server binds to. `0.0.0.0` allows LAN/container access; `127.0.0.1` restricts to this machine only |
-| `AZURE_DEVOPS_PAT` | Optional | — | Local reference only; the PAT is normally entered in the app UI per request and is never required to start the server |
+| `APP_HTTPS_PORT` | Optional | `443` | Host port the Caddy reverse proxy publishes for HTTPS. Change if `443` is already used by another service |
+| `ADVERTISED_HOST` | Optional | auto-detected | IP/hostname other devices use to reach this deployment - only affects printed URLs/logging, never how anything binds |
+| `AZURE_DEVOPS_BASE_URL` / `AZURE_DEVOPS_ORGANIZATION` / `AZURE_DEVOPS_PROJECT` | Optional | — | Non-secret defaults prefilled into the "Connect to Azure DevOps" dialog. Users can still edit/override every field |
+| `AZURE_DEVOPS_PAT` | Optional | — | Server-side only; never sent to the browser (only a `hasConfiguredPat` boolean is). Used when a user leaves the PAT field blank. **Shared by everyone using this deployment** - see [Azure DevOps connection defaults](#azure-devops-connection-defaults) |
 | `NODE_ENV` | Development-only | `development` | Set automatically by the setup scripts / Docker image; you shouldn't need to set it yourself |
 | `SESSION_SECRET` | Development-only | auto-generated | Reserved for future session/auth support (not currently read by the app) |
-| *(none currently)* | Production | — | No app-specific production variables beyond the above; TLS/domain config lives in your reverse proxy, not in `.env` |
+| *(none currently)* | Production | — | No further app-specific production variables beyond the above; a public-domain/public-CA reverse proxy config lives in `deploy/`, not in `.env` |
+
+### Azure DevOps connection defaults
+
+If `AZURE_DEVOPS_BASE_URL` / `AZURE_DEVOPS_ORGANIZATION` / `AZURE_DEVOPS_PROJECT`
+are set, the "Connect to Azure DevOps" dialog prefills those fields from
+`GET /api/config/azure-devops` - a non-secret endpoint that never returns the
+PAT itself. Users can still edit or replace every field for their own
+connection attempt; nothing they type is written back to `.env`.
+
+If `AZURE_DEVOPS_PAT` is also set, the dialog shows a note that a PAT is
+configured for this deployment. Leaving the PAT field blank uses that
+environment PAT server-side for the request; typing a PAT always overrides it
+for that connection only. **Anyone with network access to this deployment's
+HTTPS endpoint can use the configured PAT** (there is no authentication - see
+the security note above) - only set `AZURE_DEVOPS_PAT` if you're comfortable
+sharing that token with everyone who can reach this instance.
 
 ## Database schema updates
 
@@ -210,31 +234,70 @@ change outside the scope of this setup pass.
 
 ## Accessing the app from another computer (LAN)
 
-The server binds to `0.0.0.0` by default and the container publishes `PORT`
-to the host, so once it's running you can open it from any other device on
-the same network at:
+The app itself is never published to the host - only the `caddy` reverse
+proxy container is, over HTTPS. Once running, open it from any other device
+on the same network at:
 
 ```
-http://<host-machine-LAN-IP>:5000
+https://<host-machine-LAN-IP>
 ```
 
+(or `https://<host-machine-LAN-IP>:<APP_HTTPS_PORT>` if you changed the port).
 Find your machine's LAN IP with `ipconfig` (Windows) or `ip addr` / `ifconfig`
-(macOS/Linux). The setup scripts print this URL automatically when available.
-**This is LAN-only** - it does not make the app reachable from the internet.
+(macOS/Linux). The setup scripts print this URL automatically. **This is
+LAN-only** - it does not make the app reachable from the internet.
+
+Browsers will show a certificate warning the first time, because Caddy uses
+an internal (self-signed) CA rather than a publicly-trusted one - see
+[HTTPS / internal CA](#https--internal-ca) to install it and avoid the warning.
+
+### HTTPS / internal CA
+
+This deployment is reached by IP address, not a public domain name, so Caddy
+issues certificates from its own internal CA (`tls internal` in
+[Caddyfile](Caddyfile)) instead of a publicly-trusted one like Let's
+Encrypt. That's why browsers show a certificate warning until that CA is
+trusted. To remove the warning on a client Windows computer:
+
+1. Export the generated root certificate from the running `caddy` container:
+   ```powershell
+   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .\project-wrapped-ca.crt
+   ```
+2. Install it into the Trusted Root Certification Authorities store (requires
+   Administrator):
+   ```powershell
+   Import-Certificate -FilePath .\project-wrapped-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+   ```
+   Or double-click the `.crt` file → **Install Certificate** → **Local
+   Machine** → **Place all certificates in the following store** → **Trusted
+   Root Certification Authorities**.
+3. Restart the browser and reopen the HTTPS URL - the warning should be gone.
+
+Only the certificate (`root.crt`) is exported - never the private key
+(`root.key`), which stays inside the `caddy` container/volume. Do not commit
+the exported `.crt` file to the repository; it's specific to this
+deployment's Caddy instance and is regenerated if the `project_wrapped_caddy_data`
+volume is ever removed.
+
+For diagnostics only, you can skip certificate verification with
+`curl.exe -k` - never disable TLS verification in the application itself.
 
 ### Firewall
 
-Windows Firewall may prompt to allow the app the first time another device
-connects — allow it for Private networks. If it doesn't prompt, or you use a
-custom port, open it manually:
+The setup script creates an inbound Windows Firewall rule for the HTTPS port
+(`443` by default) automatically **when run as Administrator**. If it isn't
+run elevated, it prints the exact command to run yourself:
 
 ```powershell
-New-NetFirewallRule -DisplayName "Project-Wrapped" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+New-NetFirewallRule -DisplayName "Project-Wrapped HTTPS 443" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443 -Profile Domain,Private
 ```
 
-Only the app's `PORT` (default `5000`) needs to be reachable from other
-devices; the database port (`5432` by default) is bound to `127.0.0.1` only
-by `docker-compose.yml` and is never exposed to the LAN or internet.
+The rule is idempotent (re-running the script never creates a duplicate) and
+scoped to the Domain/Private firewall profiles rather than every network.
+Only the HTTPS port needs to be reachable from other devices; the app's
+internal port (`5000`) is never published to the host, and the database port
+(`5432` by default) is bound to `127.0.0.1` only and is never exposed to the
+LAN or internet.
 
 ## Internet / production deployment
 
@@ -260,18 +323,21 @@ by `docker-compose.yml` and is never exposed to the LAN or internet.
 > - **Backups** (see below) and a plan for **applying updates**
 >   (`git pull && docker compose up -d --build`).
 
-The recommended path is Docker Compose (as above) plus a reverse proxy in
-front of it that terminates TLS; the app itself keeps listening on `PORT`
-over plain HTTP, only reachable from the proxy (bind `HOST=127.0.0.1` for the
-`-Dev` workflow, or simply don't publish the app's port to anything but
-`127.0.0.1` if the proxy runs on the same machine).
+The recommended path is Docker Compose (as above) plus a **separate**
+public-facing reverse proxy in front of it that terminates TLS with a
+publicly-trusted certificate for your real domain (the built-in `caddy`
+service already terminates TLS for LAN/IP access with an internal CA - see
+[HTTPS / internal CA](#https--internal-ca) - but that certificate is not
+trusted by browsers over the public internet, so a domain deployment needs
+its own public-CA proxy in front rather than reusing it).
 
 Example configs are provided for both:
 - [deploy/nginx.conf.example](deploy/nginx.conf.example) — needs `certbot` (or similar) for certificates
 - [deploy/Caddyfile.example](deploy/Caddyfile.example) — automatically provisions and renews Let's Encrypt certificates
 
-Copy one, replace the domain, and point it at the app (`127.0.0.1:5000`, or
-the Docker network address if the proxy also runs in a container).
+Copy one, replace the domain, and point it at the app's HTTPS port
+(`127.0.0.1:${APP_HTTPS_PORT}`, i.e. the built-in `caddy` service - not the
+app container directly, which is never published to the host).
 
 ## Stopping the app
 

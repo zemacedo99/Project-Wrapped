@@ -40,6 +40,14 @@
     (the server always binds 0.0.0.0, i.e. all interfaces). Can also be set
     via the ADVERTISED_HOST environment variable.
 
+.PARAMETER HttpsPort
+    Host port the Caddy reverse proxy publishes for HTTPS (default 443).
+    Change this if 443 is already in use by another service on this machine
+    (IIS, another reverse proxy, VPN software, etc.) - the script detects
+    and reports the conflict rather than silently picking a different port.
+    Can also be set via the APP_HTTPS_PORT environment variable / .env.
+    Not used in -Dev mode (no reverse proxy is started).
+
 .EXAMPLE
     .\setup-and-start.ps1
     Fresh clone or daily use: build/start the database + app in Docker.
@@ -60,6 +68,11 @@
     .\setup-and-start.ps1 -AdvertisedHost 10.53.220.71
     Force the displayed "Network:" URL to a specific address (e.g. the
     correct LAN IP when auto-detection picks a VPN/virtual adapter instead).
+
+.EXAMPLE
+    .\setup-and-start.ps1 -HttpsPort 8443 -AdvertisedHost 10.8.220.73
+    Use an alternative HTTPS port (e.g. because 443 is already occupied by
+    another service) together with a specific advertised address.
 #>
 [CmdletBinding()]
 param(
@@ -68,7 +81,8 @@ param(
     [switch]$ResetDatabase,
     [switch]$Force,
     [switch]$SkipInstall,
-    [string]$AdvertisedHost
+    [string]$AdvertisedHost,
+    [int]$HttpsPort
 )
 
 $ErrorActionPreference = "Stop"
@@ -204,34 +218,54 @@ function Test-IsAdministrator {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Register-AppFirewallRule([int]$Port) {
+function Get-PortOwnerDescription([int]$Port) {
+    # Best-effort: identifies the process already listening on $Port, so a
+    # conflict (e.g. IIS or another reverse proxy already on 443) can be
+    # reported instead of silently picked around.
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+        $names = $conns | ForEach-Object {
+            $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+            if ($proc) { "$($proc.ProcessName) (PID $($proc.Id))" } else { "PID $($_.OwningProcess)" }
+        } | Select-Object -Unique
+        if ($names) { return ($names -join ", ") }
+    }
+    catch { }
+    return $null
+}
+
+function Register-FirewallRule([string]$RuleName, [int]$Port) {
     # Idempotent: creates the inbound allow rule for $Port on first run, and
     # leaves it alone (no duplicates) on subsequent runs. Scoped by Windows
     # Firewall profile only (Domain, Private) rather than a specific local
     # address, since the LAN/VPN-assigned address of this host can change
     # between reboots or VPN reconnects.
-    $ruleName = "Project-Wrapped TCP $Port"
-    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    $existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
     if ($existing) {
-        Write-Ok "Firewall rule '$ruleName' already exists - leaving it as-is."
+        Write-Ok "Firewall rule '$RuleName' already exists - leaving it as-is."
         return
     }
 
     if (-not (Test-IsAdministrator)) {
         Write-Warn "Not running as Administrator - cannot create the Windows Firewall rule automatically."
         Write-Host "   To allow other devices on the network to reach this app, run PowerShell as Administrator and execute:" -ForegroundColor Gray
-        Write-Host "   New-NetFirewallRule -DisplayName '$ruleName' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Domain,Private" -ForegroundColor Gray
+        Write-Host "   New-NetFirewallRule -DisplayName '$RuleName' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Domain,Private" -ForegroundColor Gray
         return
     }
 
     try {
-        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
+        New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow `
             -Protocol TCP -LocalPort $Port -Profile Domain, Private -ErrorAction Stop | Out-Null
-        Write-Ok "Created firewall rule '$ruleName' (Domain/Private profiles, TCP $Port)."
+        Write-Ok "Created firewall rule '$RuleName' (Domain/Private profiles, TCP $Port)."
     }
     catch {
-        Write-Warn "Could not create firewall rule '$ruleName': $($_.Exception.Message)"
+        Write-Warn "Could not create firewall rule '$RuleName': $($_.Exception.Message)"
     }
+}
+
+function Format-BaseUrl([string]$HostName, [int]$Port) {
+    if ($Port -eq 443) { return "https://$HostName" }
+    return "https://${HostName}:$Port"
 }
 
 function Wait-ServiceHealthy([string]$Service, [int]$TimeoutSeconds = 90) {
@@ -351,6 +385,21 @@ if (-not $port) { $port = 5000 }
 $pgPort = [int]([Environment]::GetEnvironmentVariable("POSTGRES_PORT"))
 if (-not $pgPort) { $pgPort = 5432 }
 
+# HTTPS port published by the Caddy reverse proxy (not used in -Dev mode).
+# Precedence: -HttpsPort param > APP_HTTPS_PORT (env/.env) > 443 default.
+$httpsPort = [int]([Environment]::GetEnvironmentVariable("APP_HTTPS_PORT"))
+if ($HttpsPort) { $httpsPort = $HttpsPort }
+if (-not $httpsPort) { $httpsPort = 443 }
+
+# IP/hostname advertised to other devices. Only affects what's printed and
+# what's passed to the Caddy container for logging - never how anything
+# binds. Resolved now (rather than after containers start) so it can also be
+# exported for docker compose variable interpolation below.
+$advertisedHost = Get-LanIp
+if (-not $advertisedHost) { $advertisedHost = "localhost" }
+[Environment]::SetEnvironmentVariable("ADVERTISED_HOST", $advertisedHost, "Process")
+[Environment]::SetEnvironmentVariable("APP_HTTPS_PORT", $httpsPort, "Process")
+
 # ---------------------------------------------------------------------------
 # -ResetDatabase: destructive, requires confirmation
 # ---------------------------------------------------------------------------
@@ -377,6 +426,21 @@ $alreadyUp = (Invoke-Compose @("ps", "--status", "running", "--format", "json") 
 foreach ($p in @($port, $pgPort) | Select-Object -Unique) {
     if (-not (Test-PortFree $p)) {
         Write-Warn "Port $p appears to be in use. If that's this project already running, this is fine. Otherwise, stop whatever else is using port $p, or change PORT/POSTGRES_PORT in .env."
+    }
+}
+if (-not $Dev) {
+    if (-not (Test-PortFree $httpsPort)) {
+        $owner = Get-PortOwnerDescription $httpsPort
+        $ownerText = if ($owner) { " (currently used by: $owner)" } else { "" }
+        if ($owner -and $owner -notmatch "com\.docker|docker-proxy|vpnkit") {
+            Write-Warn "Port $httpsPort appears to be in use by something other than this project's own containers$ownerText."
+            Write-Host "   This is likely IIS, another reverse proxy, or VPN software already bound to $httpsPort." -ForegroundColor Gray
+            Write-Host "   This script will NOT stop or replace it. Pick a free port instead, e.g.:" -ForegroundColor Gray
+            Write-Host "   .\setup-and-start.ps1 -HttpsPort 8443 -AdvertisedHost $advertisedHost" -ForegroundColor Gray
+        }
+        else {
+            Write-Warn "Port $httpsPort appears to be in use$ownerText. If that's this project's own Caddy container already running, this is fine."
+        }
     }
 }
 Write-Ok "Port check complete"
@@ -415,7 +479,7 @@ if ($Dev) {
     Write-Ok "Schema is up to date"
 
     $lanIp = Get-LanIp
-    Register-AppFirewallRule -Port $port
+    Register-FirewallRule -RuleName "Project-Wrapped TCP $port" -Port $port
 
     Write-Step "Starting application (development mode, hot reload)"
     Write-Host "Local:   http://localhost:$port" -ForegroundColor Cyan
@@ -426,7 +490,9 @@ if ($Dev) {
 }
 
 # ---------------------------------------------------------------------------
-# Default: full Docker Compose deployment (database + containerised app)
+# Default: full Docker Compose deployment (database + app + Caddy reverse
+# proxy). Users reach the app over HTTPS on $httpsPort; the app container
+# itself is never published to the host (see docker-compose.yml).
 # ---------------------------------------------------------------------------
 Write-Step "Building and starting containers (docker compose up -d --build)"
 Invoke-Compose @("up", "-d", "--build")
@@ -443,11 +509,19 @@ if (-not (Wait-ServiceHealthy "app" 120)) {
 }
 Write-Ok "Application is healthy"
 
-$lanIp = Get-LanIp
-Register-AppFirewallRule -Port $port
+if (-not (Wait-ServiceHealthy "caddy" 60)) {
+    Show-Diagnostics
+    Fail "Reverse proxy (Caddy) did not become healthy in time. Run 'docker compose logs caddy' to investigate."
+}
+Write-Ok "Reverse proxy is healthy"
+
+Register-FirewallRule -RuleName "Project-Wrapped HTTPS $httpsPort" -Port $httpsPort
 
 Write-Host "`nProject-Wrapped is running." -ForegroundColor Green
-Write-Host "Local:   http://localhost:$port" -ForegroundColor Cyan
-if ($lanIp) { Write-Host "Network: http://${lanIp}:$port" -ForegroundColor Cyan }
+Write-Host ""
+Write-Host "Local:   $(Format-BaseUrl 'localhost' $httpsPort)" -ForegroundColor Cyan
+Write-Host "Network: $(Format-BaseUrl $advertisedHost $httpsPort)" -ForegroundColor Cyan
+Write-Host "`nThe first visit will show a certificate warning (self-signed internal CA) -" -ForegroundColor Gray
+Write-Host "see README.md 'HTTPS / internal CA' to install the trusted root certificate." -ForegroundColor Gray
 Write-Host "`nStop with:   .\setup-and-start.ps1 -Stop" -ForegroundColor Gray
 Write-Host "Update with: git pull; .\setup-and-start.ps1" -ForegroundColor Gray

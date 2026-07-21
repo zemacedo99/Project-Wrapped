@@ -4,9 +4,15 @@
 # name collisions between the copies.
 #
 # ---------------------------------------------------------------------------
-# Recommended deployment: `docker compose up -d --build` starts BOTH services
-# below (database + containerised app). This is what setup-and-start.ps1 runs
-# by default. Requires only Docker - no local Node.js/npm install needed.
+# Recommended deployment: `docker compose up -d --build` starts all THREE
+# services below (database + containerised app + Caddy reverse proxy). This
+# is what setup-and-start.ps1 runs by default. Requires only Docker - no
+# local Node.js/npm install needed.
+#
+# Users reach the app over HTTPS on port 443 (or ${APP_HTTPS_PORT}), served
+# by Caddy with its internal CA (see Caddyfile). The "app" service itself is
+# never published to the host/LAN - only reachable from "caddy" over the
+# internal Compose network on port 5000. See README.md "HTTPS / internal CA".
 #
 # For local development with hot-reload, use setup-and-start.ps1 -Dev instead:
 # it starts only `db` here and runs the app on the host with `npm run dev`.
@@ -43,15 +49,54 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: ${PORT:-5000}
+      # Optional Azure DevOps connection defaults (all non-secret except the
+      # PAT, which is never sent to the browser - see server/routes.ts).
+      AZURE_DEVOPS_BASE_URL: ${AZURE_DEVOPS_BASE_URL:-}
+      AZURE_DEVOPS_ORGANIZATION: ${AZURE_DEVOPS_ORGANIZATION:-}
+      AZURE_DEVOPS_PROJECT: ${AZURE_DEVOPS_PROJECT:-}
+      AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
       # Internal service-to-service connection (Compose DNS name "db"),
       # independent of the DATABASE_URL a host-run dev server would use.
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-project_wrapped}
-    ports:
-      - "${PORT:-5000}:5000"
+    # Reachable only from other containers on the Compose network (the
+    # "caddy" service below) - NOT published to the host or the LAN. External
+    # access goes through the "caddy" reverse proxy on HTTPS instead.
+    expose:
+      - "5000"
     depends_on:
       db:
         condition: service_healthy
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      # Only used for informational/logging purposes inside the Caddyfile;
+      # the site block itself is a catch-all (see Caddyfile) so it works
+      # regardless of this value, including when the LAN/VPN-assigned
+      # address of the host changes between reboots or VPN reconnects.
+      ADVERTISED_HOST: ${ADVERTISED_HOST:-localhost}
+    ports:
+      # The only port this deployment publishes to the host/LAN.
+      - "${APP_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - project_wrapped_caddy_data:/data
+      - project_wrapped_caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--spider", "-q", "https://localhost/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   project_wrapped_pgdata:
     name: project_wrapped_pgdata
+  project_wrapped_caddy_data:
+    name: project_wrapped_caddy_data
+  project_wrapped_caddy_config:
+    name: project_wrapped_caddy_config

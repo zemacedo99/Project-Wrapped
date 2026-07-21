@@ -1,0 +1,48 @@
+# Reverse proxy / TLS termination for Project-Wrapped.
+#
+# This is an internal-network deployment reached by IP address (or
+# "localhost"), not a public DNS domain name, so Caddy's internal CA is used
+# instead of a public one (Let's Encrypt etc.) - see the `tls internal`
+# directive below. Browsers will show a certificate warning until the
+# generated root CA is installed on client machines; see README.md
+# "HTTPS / internal CA" for the exact steps.
+#
+# A catch-all site address (":443", no hostname) is used deliberately:
+# - The LAN/VPN-assigned IP of the host machine can change between reboots
+#   or VPN reconnects (see repo notes) - hardcoding a specific IP or
+#   hostname here would need editing every time that happens.
+#   ADVERTISED_HOST (passed through by docker-compose.yml) is therefore only
+#   used for operator-facing messages, not for matching requests.
+# - Caddy's internal issuer signs a certificate on demand for whatever
+#   hostname/IP the client actually connects with, so "https://localhost",
+#   "https://127.0.0.1" and "https://<the-LAN-or-VPN-IP>" all work without
+#   listing every possible name individually. This requires the explicit
+#   `on_demand` option below - without it, a site address with no static
+#   hostname has nothing to issue a certificate for and TLS handshakes fail.
+
+{
+	# No plaintext :80 listener/redirect - only 443 is published to the host.
+	auto_https disable_redirects
+}
+
+:443 {
+	# Caddy logs a warning that unrestricted on-demand TLS could be abused
+	# (a client could request certs for many different SNI values, costing
+	# CPU/storage). Accepted here: this deployment is internal/firewalled
+	# (see README.md security note - there's no app authentication either),
+	# so anyone who could send such requests already has full network access
+	# to the app regardless. Restricting via an "ask" endpoint isn't set up
+	# because there is no separate service available to ask, and a static
+	# allow-list would reintroduce the "edit this file every time the LAN/VPN
+	# IP changes" problem this catch-all address avoids.
+	tls internal {
+		on_demand
+	}
+
+	encode gzip zstd
+
+	# Host, X-Forwarded-For and X-Forwarded-Proto are passed through / set by
+	# reverse_proxy automatically. Express already sets
+	# `app.set("trust proxy", 1)` to trust them - see server/index.ts.
+	reverse_proxy app:5000
+}

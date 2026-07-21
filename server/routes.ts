@@ -11,10 +11,49 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }
 });
 
+// Resolves the Azure DevOps PAT to use for one connection attempt.
+//
+// Precedence: a PAT typed by the user in the request body always wins; only
+// falls back to the server-side AZURE_DEVOPS_PAT env var when the client
+// explicitly asks for it (useConfiguredPat) or simply didn't type one while
+// a configured PAT exists. The literal env PAT value is never echoed back in
+// any response - only used server-side to call Azure DevOps.
+function resolvePat(body: { personalAccessToken?: unknown; useConfiguredPat?: unknown }): string | undefined {
+  const typed = typeof body.personalAccessToken === "string" ? body.personalAccessToken.trim() : "";
+  if (typed) return typed;
+
+  const configured = process.env.AZURE_DEVOPS_PAT?.trim();
+  if (!configured) return undefined;
+
+  // Explicit opt-in, or an empty/omitted field while a configured PAT exists.
+  if (body.useConfiguredPat === true || typeof body.personalAccessToken !== "string" || !typed) {
+    return configured;
+  }
+  return undefined;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Minimal liveness/readiness check - never exposes secrets or internals.
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
+  // Non-secret Azure DevOps connection defaults for the "Connect to Azure
+  // DevOps" dialog. Deliberately never includes the PAT itself - only a
+  // boolean indicating whether one is configured server-side.
+  app.get("/api/config/azure-devops", (_req, res) => {
+    const sanitize = (value: string | undefined) => (typeof value === "string" ? value.trim() : "");
+    res.json({
+      baseUrl: sanitize(process.env.AZURE_DEVOPS_BASE_URL),
+      organization: sanitize(process.env.AZURE_DEVOPS_ORGANIZATION),
+      project: sanitize(process.env.AZURE_DEVOPS_PROJECT),
+      hasConfiguredPat: Boolean(process.env.AZURE_DEVOPS_PAT?.trim()),
+    });
+  });
+
   app.get("/api/wrapped", async (_req, res) => {
     try {
       const data = await storage.getProjectWrappedData();
@@ -86,11 +125,16 @@ export async function registerRoutes(
 
   app.post("/api/connect/azure-devops", async (req, res) => {
     try {
-      const { organization, project, personalAccessToken, baseUrl, dateFrom, dateTo, repositories } = req.body;
+      const { organization, project, baseUrl, dateFrom, dateTo, repositories } = req.body;
+      const personalAccessToken = resolvePat(req.body);
 
       const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
       if (validationErrors.length > 0) {
         res.status(400).json({ error: validationErrors.join(", ") });
+        return;
+      }
+      if (!personalAccessToken) {
+        res.status(400).json({ error: "Personal Access Token is required" });
         return;
       }
 
@@ -119,11 +163,16 @@ export async function registerRoutes(
 
   app.post("/api/test/azure-devops", async (req, res) => {
     try {
-      const { organization, project, personalAccessToken, baseUrl } = req.body;
+      const { organization, project, baseUrl } = req.body;
+      const personalAccessToken = resolvePat(req.body);
 
       const validationErrors = validateAzureDevOpsConfig({ organization, project, personalAccessToken });
       if (validationErrors.length > 0) {
         res.status(400).json({ error: validationErrors.join(", ") });
+        return;
+      }
+      if (!personalAccessToken) {
+        res.status(400).json({ error: "Personal Access Token is required" });
         return;
       }
 
