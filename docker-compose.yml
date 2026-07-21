@@ -4,15 +4,22 @@
 # name collisions between the copies.
 #
 # ---------------------------------------------------------------------------
-# Recommended deployment: `docker compose up -d --build` starts all THREE
-# services below (database + containerised app + Caddy reverse proxy). This
-# is what setup-and-start.ps1 runs by default. Requires only Docker - no
-# local Node.js/npm install needed.
+# Recommended deployment: `docker compose up -d --build` starts the database
+# and the containerised app. This is what setup-and-start.ps1 runs by
+# default. Requires only Docker - no local Node.js/npm install needed.
 #
-# Users reach the app over HTTPS on port 443 (or ${APP_HTTPS_PORT}), served
-# by Caddy with its internal CA (see Caddyfile). The "app" service itself is
-# never published to the host/LAN - only reachable from "caddy" over the
-# internal Compose network on port 5000. See README.md "HTTPS / internal CA".
+# Users reach the app over plain HTTP on port ${PORT} (default 5000). The
+# app service is published directly to the host/LAN and binds 0.0.0.0, so
+# any device on the same network can open http://<this-machine-ip>:${PORT}.
+# This is the simplest, most reliable setup for internal/LAN access (no TLS
+# certificate to install on each client).
+#
+# Optional HTTPS: an extra `caddy` reverse-proxy service (behind the
+# "https" Compose profile) can terminate TLS on port 443 using an internal
+# CA. It is NOT started by default - enable it with:
+#     docker compose --profile https up -d --build
+#   or setup-and-start.ps1 -Https
+# See README.md "HTTPS / internal CA".
 #
 # For local development with hot-reload, use setup-and-start.ps1 -Dev instead:
 # it starts only `db` here and runs the app on the host with `npm run dev`.
@@ -58,17 +65,23 @@ services:
       # Internal service-to-service connection (Compose DNS name "db"),
       # independent of the DATABASE_URL a host-run dev server would use.
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-project_wrapped}
-    # Reachable only from other containers on the Compose network (the
-    # "caddy" service below) - NOT published to the host or the LAN. External
-    # access goes through the "caddy" reverse proxy on HTTPS instead.
-    expose:
-      - "5000"
+    # Published directly to the host and the LAN over plain HTTP. Docker
+    # binds 0.0.0.0 by default, so other devices on the network can reach
+    # http://<this-machine-ip>:${PORT}. The container listens on ${PORT}
+    # internally (see the PORT env var above and Dockerfile EXPOSE).
+    ports:
+      - "${PORT:-5000}:${PORT:-5000}"
     depends_on:
       db:
         condition: service_healthy
 
+  # Optional HTTPS reverse proxy. Only started when the "https" Compose
+  # profile is active (docker compose --profile https up, or
+  # setup-and-start.ps1 -Https). Not part of the default HTTP deployment.
   caddy:
     image: caddy:2-alpine
+    profiles:
+      - https
     restart: unless-stopped
     environment:
       # Only used for informational/logging purposes inside the Caddyfile;

@@ -6,7 +6,8 @@
 # entirely through Docker Compose - only Docker is required on the host.
 #
 # Usage:
-#   ./setup-and-start.sh                  Full Docker Compose deploy (db + app)
+#   ./setup-and-start.sh                  Full Docker Compose deploy (db + app), plain HTTP
+#   ./setup-and-start.sh --https          Same, plus Caddy HTTPS reverse proxy (internal CA)
 #   ./setup-and-start.sh --dev            Local dev: DB in Docker, app via `npm run dev`
 #   ./setup-and-start.sh --stop           Stop containers (data preserved)
 #   ./setup-and-start.sh --reset-database Wipe the local database (asks to confirm)
@@ -23,6 +24,7 @@ STOP=false
 RESET_DATABASE=false
 FORCE=false
 SKIP_INSTALL=false
+HTTPS=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -31,6 +33,7 @@ for arg in "$@"; do
     --reset-database) RESET_DATABASE=true ;;
     --force) FORCE=true ;;
     --skip-install) SKIP_INSTALL=true ;;
+    --https) HTTPS=true ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -206,10 +209,18 @@ if [ "$DEV" = true ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Default: full Docker Compose deployment (database + containerised app)
+# Default: full Docker Compose deployment (database + containerised app) over
+# plain HTTP. The app is published on PORT and binds 0.0.0.0, so other devices
+# on the LAN can reach http://<lan-ip>:PORT. Pass --https to also start Caddy.
 # ---------------------------------------------------------------------------
-step "Building and starting containers (docker compose up -d --build)"
-"${COMPOSE[@]}" up -d --build
+HTTPS_PORT="${APP_HTTPS_PORT:-443}"
+if [ "$HTTPS" = true ]; then
+  step "Building and starting containers with HTTPS (docker compose --profile https up -d --build)"
+  "${COMPOSE[@]}" --profile https up -d --build
+else
+  step "Building and starting containers (docker compose up -d --build)"
+  "${COMPOSE[@]}" up -d --build
+fi
 
 if ! wait_healthy db 90; then
   show_diagnostics
@@ -223,12 +234,26 @@ if ! wait_healthy app 120; then
 fi
 ok "Application is healthy"
 
+if [ "$HTTPS" = true ]; then
+  if ! wait_healthy caddy 60; then
+    show_diagnostics
+    fail "Reverse proxy (Caddy) did not become healthy in time. Run 'docker compose logs caddy' to investigate."
+  fi
+  ok "Reverse proxy is healthy"
+fi
+
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [ -z "$LAN_IP" ] && LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 
 echo -e "\n\033[32mProject-Wrapped is running.\033[0m"
-echo -e "\033[36mLocal:   http://localhost:$PORT\033[0m"
-[ -n "$LAN_IP" ] && echo -e "\033[36mNetwork: http://$LAN_IP:$PORT\033[0m"
-echo "Your OS firewall may need to allow inbound connections on port $PORT for other devices to reach it."
+if [ "$HTTPS" = true ]; then
+  echo -e "\033[36mLocal:   https://localhost:${HTTPS_PORT}\033[0m"
+  [ -n "$LAN_IP" ] && echo -e "\033[36mNetwork: https://$LAN_IP:${HTTPS_PORT}  <-- open this from the other PC\033[0m"
+  echo "The first visit shows a certificate warning (self-signed internal CA) - see README.md 'HTTPS / internal CA'."
+else
+  echo -e "\033[36mLocal:   http://localhost:$PORT\033[0m"
+  [ -n "$LAN_IP" ] && echo -e "\033[36mNetwork: http://$LAN_IP:$PORT  <-- open this from the other PC\033[0m"
+  echo "Your OS firewall may need to allow inbound connections on port $PORT for other devices to reach it."
+fi
 echo -e "\nStop with:   ./setup-and-start.sh --stop"
 echo "Update with: git pull && ./setup-and-start.sh"

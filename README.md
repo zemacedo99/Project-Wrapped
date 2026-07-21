@@ -65,13 +65,15 @@ cd Project-Wrapped
 ```
 
 That single command validates Docker, creates `.env` (with freshly generated
-local database credentials), builds and starts the database, the app **and**
-a Caddy reverse proxy in Docker, waits for all three to become healthy,
-applies the database schema, and prints the URLs below. No manual
-`npm install`, migration, or extra Docker commands are needed.
+local database credentials), builds and starts the database and the app in
+Docker over plain HTTP, waits for both to become healthy, applies the
+database schema, opens the Windows Firewall port (when run as Administrator),
+and prints the URLs below. No manual `npm install`, migration, or extra
+Docker commands are needed.
 
-- **Open locally:** `https://localhost` (you'll see a certificate warning the first time - see [HTTPS / internal CA](#https--internal-ca) below)
-- **From another device on the same network (LAN):** `https://<this-computer's-LAN-IP>` (printed by the script)
+- **Open locally:** `http://localhost:5000`
+- **From another device on the same network (LAN):** `http://<this-computer's-LAN-IP>:5000` (printed by the script)
+- **Optional HTTPS:** add `-Https` to serve TLS on port 443 via Caddy (self-signed internal CA - see [HTTPS / internal CA](#https--internal-ca))
 - **Stop it:** `.\setup-and-start.ps1 -Stop` (data is preserved)
 - **Update after `git pull`:** just re-run `.\setup-and-start.ps1` (it rebuilds the image and reapplies the schema)
 - **Persistent data:** stored in the Docker named volume `project_wrapped_pgdata` — it survives `docker compose down` and computer restarts, and is only deleted by `-ResetDatabase`
@@ -96,19 +98,21 @@ There are three distinct ways to run this app - pick the one that matches what y
 .\setup-and-start.ps1
 ```
 
-Internally this runs `docker compose up -d --build`, which starts three
-containers: `db` (PostgreSQL), `app` (the built, production-mode server, not
-published to the host - only reachable from `caddy`), and `caddy` (reverse
-proxy terminating HTTPS on port 443 with an internal CA - see
-[HTTPS / internal CA](#https--internal-ca)). The script just adds
-prerequisite checks, `.env` bootstrapping, health-check waiting, and
-friendly status output — you can also run the plain Compose commands
+Internally this runs `docker compose up -d --build`, which starts two
+containers: `db` (PostgreSQL) and `app` (the built, production-mode server,
+published directly on `PORT`/`5000` and bound to `0.0.0.0` so other devices
+on the LAN can reach it over plain HTTP). The script just adds prerequisite
+checks, `.env` bootstrapping, health-check waiting, a Windows Firewall rule,
+and friendly status output — you can also run the plain Compose commands
 yourself once `.env` exists:
 
 ```bash
 git pull
 docker compose up -d --build
 ```
+
+To additionally terminate TLS with the optional Caddy reverse proxy, use
+`.\setup-and-start.ps1 -Https` (or `docker compose --profile https up -d --build`).
 
 ### Local development
 
@@ -131,14 +135,15 @@ See [Internet / production deployment](#internet--production-deployment) below f
 
 | PowerShell | Bash | Description |
 |---|---|---|
-| *(none)* | *(none)* | **Recommended.** Build/start database + app + Caddy (HTTPS) in Docker |
+| *(none)* | *(none)* | **Recommended.** Build/start database + app in Docker over plain HTTP (reachable at `http://<lan-ip>:5000`) |
+| `-Https` | `--https` | Also start the Caddy reverse proxy for HTTPS on port 443 (self-signed internal CA) |
 | `-Dev` | `--dev` | Local development: DB in Docker, app on the host with hot reload (requires Node.js) |
 | `-Stop` | `--stop` | Stop the running containers (data preserved) |
 | `-ResetDatabase` | `--reset-database` | **Destructive.** Deletes the local database volume. Asks for confirmation unless `-Force` / `--force` is also given |
 | `-Force` | `--force` | Skips the confirmation prompt for `-ResetDatabase` |
 | `-SkipInstall` | `--skip-install` | `-Dev` only: skip `npm install` |
 | `-AdvertisedHost <ip>` | `--advertised-host <ip>` | Override the address shown in the printed "Network:" URL (e.g. when auto-detection picks a VPN/virtual adapter) |
-| `-HttpsPort <port>` | `--https-port <port>` | Host port Caddy publishes for HTTPS (default `443`). Use if `443` is already occupied - the script reports the owning process instead of silently picking another port |
+| `-HttpsPort <port>` | `--https-port <port>` | With `-Https`: host port Caddy publishes for HTTPS (default `443`). Use if `443` is already occupied - the script reports the owning process instead of silently picking another port |
 
 The scripts are idempotent: re-running them will not overwrite `.env`, reuse
 existing containers/volumes, and never delete data unless `-ResetDatabase`
@@ -173,11 +178,11 @@ scripts create it for you with secure generated credentials.
 | Variable | Group | Default | Description |
 |---|---|---|---|
 | `DATABASE_URL` | Required | — | PostgreSQL connection string used by the app and `drizzle-kit` |
-| `PORT` | Required | `5000` | Port the server listens on internally (not published to the host/LAN - only reachable from the `caddy` container) |
+| `PORT` | Required | `5000` | Port the server listens on and the host/LAN port published by Docker Compose (plain HTTP) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Required | see `.env.example` | Configure the Docker Compose database container; keep in sync with `DATABASE_URL` |
 | `POSTGRES_PORT` | Optional | `5432` | Host port mapped to the database container (bound to `127.0.0.1` only) |
 | `HOST` | Optional | `0.0.0.0` | Interface the server binds to. `0.0.0.0` allows LAN/container access; `127.0.0.1` restricts to this machine only |
-| `APP_HTTPS_PORT` | Optional | `443` | Host port the Caddy reverse proxy publishes for HTTPS. Change if `443` is already used by another service |
+| `APP_HTTPS_PORT` | Optional | `443` | With `-Https` only: host port the Caddy reverse proxy publishes for HTTPS. Change if `443` is already used by another service |
 | `ADVERTISED_HOST` | Optional | auto-detected | IP/hostname other devices use to reach this deployment - only affects printed URLs/logging, never how anything binds |
 | `AZURE_DEVOPS_BASE_URL` / `AZURE_DEVOPS_ORGANIZATION` / `AZURE_DEVOPS_PROJECT` | Optional | — | Non-secret defaults prefilled into the "Connect to Azure DevOps" dialog. Users can still edit/override every field |
 | `AZURE_DEVOPS_PAT` | Optional | — | Server-side only; never sent to the browser (only a `hasConfiguredPat` boolean is). Used when a user leaves the PAT field blank. **Shared by everyone using this deployment** - see [Azure DevOps connection defaults](#azure-devops-connection-defaults) |
@@ -234,27 +239,34 @@ change outside the scope of this setup pass.
 
 ## Accessing the app from another computer (LAN)
 
-The app itself is never published to the host - only the `caddy` reverse
-proxy container is, over HTTPS. Once running, open it from any other device
-on the same network at:
+The `app` container is published directly on `PORT` (default `5000`) and binds
+all interfaces (`0.0.0.0`), so once running you can open it from any other
+device on the same network at:
 
 ```
-https://<host-machine-LAN-IP>
+http://<host-machine-LAN-IP>:5000
 ```
 
-(or `https://<host-machine-LAN-IP>:<APP_HTTPS_PORT>` if you changed the port).
-Find your machine's LAN IP with `ipconfig` (Windows) or `ip addr` / `ifconfig`
-(macOS/Linux). The setup scripts print this URL automatically. **This is
-LAN-only** - it does not make the app reachable from the internet.
+(replace `5000` with `PORT` if you changed it). Find your machine's LAN IP with
+`ipconfig` (Windows) or `ip addr` / `ifconfig` (macOS/Linux). The setup scripts
+print this URL automatically and list every reachable address of the host so
+you can hand the client the one on its network. **This is LAN-only** - it does
+not make the app reachable from the internet.
 
-Browsers will show a certificate warning the first time, because Caddy uses
-an internal (self-signed) CA rather than a publicly-trusted one - see
-[HTTPS / internal CA](#https--internal-ca) to install it and avoid the warning.
+If the other PC cannot connect, check, in order:
+
+1. **Firewall** - the inbound rule must exist for the port (see [Firewall](#firewall) below). This is the most common cause of "works locally, not remotely".
+2. **Same network** - both machines must be on the same LAN/subnet with no client isolation (guest Wi-Fi / different VLAN blocks peer traffic).
+3. **Correct IP** - use the host's address on the *client's* network. Verify from the client with `Test-NetConnection <ip> -Port 5000` (expect `TcpTestSucceeded : True`); if that is `False` it is a network/firewall path issue, not the app.
+
+Prefer HTTPS? Start with `-Https` and read [HTTPS / internal CA](#https--internal-ca)
+for the extra certificate step each client needs.
 
 ### HTTPS / internal CA
 
-This deployment is reached by IP address, not a public domain name, so Caddy
-issues certificates from its own internal CA (`tls internal` in
+HTTPS is **optional** and only runs when you start with `-Https`
+(`--https`). This deployment is reached by IP address, not a public domain
+name, so Caddy issues certificates from its own internal CA (`tls internal` in
 [Caddyfile](Caddyfile)) instead of a publicly-trusted one like Let's
 Encrypt. That's why browsers show a certificate warning until that CA is
 trusted. To remove the warning on a client Windows computer:
@@ -284,20 +296,26 @@ For diagnostics only, you can skip certificate verification with
 
 ### Firewall
 
-The setup script creates an inbound Windows Firewall rule for the HTTPS port
-(`443` by default) automatically **when run as Administrator**. If it isn't
-run elevated, it prints the exact command to run yourself:
+The setup script creates an inbound Windows Firewall rule for the app port
+(`5000` by default, or `443` when started with `-Https`) automatically **when
+run as Administrator**. If it isn't run elevated, it prints the exact command
+to run yourself:
 
 ```powershell
-New-NetFirewallRule -DisplayName "Project-Wrapped HTTPS 443" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443 -Profile Domain,Private
+New-NetFirewallRule -DisplayName "Project-Wrapped HTTP 5000" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5000 -Profile Domain,Private
 ```
 
+(use `"Project-Wrapped HTTPS 443"` / `-LocalPort 443` when running with `-Https`).
 The rule is idempotent (re-running the script never creates a duplicate) and
 scoped to the Domain/Private firewall profiles rather than every network.
-Only the HTTPS port needs to be reachable from other devices; the app's
-internal port (`5000`) is never published to the host, and the database port
+Only the app port needs to be reachable from other devices; the database port
 (`5432` by default) is bound to `127.0.0.1` only and is never exposed to the
 LAN or internet.
+
+> **This firewall step is the usual root cause of "the app runs on the server
+> but I can't open it from another PC".** If auto-creation was skipped because
+> the script wasn't elevated, run the printed `New-NetFirewallRule` command in
+> an Administrator PowerShell once - it persists across restarts.
 
 ## Internet / production deployment
 
