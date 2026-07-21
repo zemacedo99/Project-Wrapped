@@ -8,6 +8,7 @@
 # Usage:
 #   ./setup-and-start.sh                  Full Docker Compose deploy (db + app), plain HTTP
 #   ./setup-and-start.sh --https          Same, plus Caddy HTTPS reverse proxy (internal CA)
+#   ./setup-and-start.sh --ngrok          Same, plus a public outbound ngrok tunnel (prints URL)
 #   ./setup-and-start.sh --dev            Local dev: DB in Docker, app via `npm run dev`
 #   ./setup-and-start.sh --stop           Stop containers (data preserved)
 #   ./setup-and-start.sh --reset-database Wipe the local database (asks to confirm)
@@ -25,6 +26,7 @@ RESET_DATABASE=false
 FORCE=false
 SKIP_INSTALL=false
 HTTPS=false
+NGROK=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -34,6 +36,7 @@ for arg in "$@"; do
     --force) FORCE=true ;;
     --skip-install) SKIP_INSTALL=true ;;
     --https) HTTPS=true ;;
+    --ngrok) NGROK=true ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -94,12 +97,62 @@ port_free() {
   ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
+get_ngrok_url() {
+  # Reads the current public HTTPS URL from the local ngrok agent API.
+  curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null \
+    | grep -oE '"public_url":"https://[^"]+"' | head -n1 \
+    | sed -E 's/.*"(https:[^"]+)".*/\1/'
+}
+
+stop_ngrok() {
+  if pgrep -x ngrok >/dev/null 2>&1; then
+    pkill -x ngrok >/dev/null 2>&1 || true
+    ok "Stopped ngrok tunnel."
+  fi
+}
+
+start_ngrok() {
+  # Starts an OUTBOUND ngrok tunnel to http://localhost:$1 and sets
+  # NGROK_PUBLIC_URL. Outbound only - no inbound firewall/IP/routing needed.
+  local port="$1"
+  NGROK_PUBLIC_URL=""
+  if ! command -v ngrok >/dev/null 2>&1; then
+    warn "ngrok is not installed or not in PATH - skipping the tunnel (the app is still running locally)."
+    echo "   Install it (https://ngrok.com/download), run 'ngrok config add-authtoken <TOKEN>', then re-run with --ngrok."
+    return 0
+  fi
+  if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+    ngrok config add-authtoken "$NGROK_AUTHTOKEN" >/dev/null 2>&1 && ok "ngrok auth token configured from NGROK_AUTHTOKEN."
+  fi
+  local existing; existing="$(get_ngrok_url)"
+  if [ -n "$existing" ]; then
+    ok "An ngrok tunnel is already running - reusing it."
+    NGROK_PUBLIC_URL="$existing"; return 0
+  fi
+  local args=(http "$port" --log stdout)
+  [ -n "${NGROK_DOMAIN:-}" ] && args+=(--domain "$NGROK_DOMAIN")
+  [ -n "${NGROK_BASIC_AUTH:-}" ] && args+=(--basic-auth "$NGROK_BASIC_AUTH")
+  step "Starting ngrok tunnel to http://localhost:$port"
+  nohup ngrok "${args[@]}" >"$REPO_ROOT/ngrok.log" 2>&1 &
+  local deadline=$(( $(date +%s) + 25 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 1
+    local url; url="$(get_ngrok_url)"
+    if [ -n "$url" ]; then NGROK_PUBLIC_URL="$url"; return 0; fi
+  done
+  warn "ngrok started but no public URL appeared within 25s."
+  [ -f "$REPO_ROOT/ngrok.log" ] && tail -n 12 "$REPO_ROOT/ngrok.log" | sed 's/^/   /'
+  echo "   Most common cause: no auth token. Run 'ngrok config add-authtoken <TOKEN>' or set NGROK_AUTHTOKEN in .env."
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # --stop: stop containers and exit (data preserved)
 # ---------------------------------------------------------------------------
 if [ "$STOP" = true ]; then
   step "Stopping Project-Wrapped containers"
   "${COMPOSE[@]}" stop
+  stop_ngrok
   ok "Containers stopped. Data volume is preserved."
   echo "Run './setup-and-start.sh' again to restart, or 'docker compose down' to also remove the (stopped) containers."
   exit 0
@@ -254,6 +307,18 @@ else
   echo -e "\033[36mLocal:   http://localhost:$PORT\033[0m"
   [ -n "$LAN_IP" ] && echo -e "\033[36mNetwork: http://$LAN_IP:$PORT  <-- open this from the other PC\033[0m"
   echo "Your OS firewall may need to allow inbound connections on port $PORT for other devices to reach it."
+fi
+
+if [ "$NGROK" = true ]; then
+  start_ngrok "$PORT"
+  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
+    echo -e "\n\033[32m==================================================================\033[0m"
+    echo -e "\033[32m PUBLIC URL (open from ANY other PC - no VPN/firewall/IP needed):\033[0m"
+    echo -e "\033[36m   $NGROK_PUBLIC_URL\033[0m"
+    echo -e "\033[32m==================================================================\033[0m"
+    [ -z "${NGROK_BASIC_AUTH:-}" ] && warn "This app has NO login and the tunnel is PUBLIC. Set NGROK_BASIC_AUTH=user:pass in .env to protect it."
+    echo "   Local ngrok inspector: http://127.0.0.1:4040   |   Stop: ./setup-and-start.sh --stop"
+  fi
 fi
 echo -e "\nStop with:   ./setup-and-start.sh --stop"
 echo "Update with: git pull && ./setup-and-start.sh"

@@ -5,6 +5,10 @@ server/public
 vite.config.ts.*
 *.tar.gz
 
+# ngrok tunnel logs (created by setup-and-start.ps1 -Ngrok / --ngrok)
+ngrok.log
+ngrok.log.err
+
 # Environment variables
 .env
 .env.local

@@ -50,6 +50,17 @@
     certificate installed on client machines and is the simplest reliable
     option for LAN access. Use -Https only if you specifically need TLS.
 
+.PARAMETER Ngrok
+    After the app is up and healthy, start an OUTBOUND ngrok tunnel to the
+    local app port and print the public HTTPS URL. Use this when inbound
+    access is blocked by a corporate firewall/VPN/VLAN - the tunnel is an
+    outbound connection from the server, so it needs no inbound firewall
+    rule, no correct server IP, and no LAN routing. Requires ngrok installed
+    and an auth token configured once (ngrok config add-authtoken <TOKEN>,
+    or set NGROK_AUTHTOKEN in .env). Optional .env vars: NGROK_DOMAIN (a
+    reserved ngrok domain) and NGROK_BASIC_AUTH (user:pass to password-
+    protect the public URL - strongly recommended, the app has no login).
+
 .PARAMETER HttpsPort
     Host port the Caddy reverse proxy publishes for HTTPS (default 443).
     Only used together with -Https. Change this if 443 is already in use by
@@ -87,6 +98,12 @@
     correct LAN IP when auto-detection picks a VPN/virtual adapter instead).
 
 .EXAMPLE
+    .\setup-and-start.ps1 -Ngrok
+    Start the app over HTTP, then open a public ngrok tunnel to it and print
+    the https://<something>.ngrok URL to open from any other PC (no VPN,
+    inbound firewall rule, or server IP needed).
+
+.EXAMPLE
     .\setup-and-start.ps1 -Https -HttpsPort 8443 -AdvertisedHost 10.8.220.73
     Use HTTPS on an alternative port (e.g. because 443 is already occupied by
     another service) together with a specific advertised address.
@@ -99,6 +116,7 @@ param(
     [switch]$Force,
     [switch]$SkipInstall,
     [switch]$Https,
+    [switch]$Ngrok,
     [string]$AdvertisedHost,
     [int]$HttpsPort
 )
@@ -315,6 +333,93 @@ function Format-BaseUrl([string]$HostName, [int]$Port) {
     return "https://${HostName}:$Port"
 }
 
+function Get-NgrokPublicUrl {
+    # Queries the local ngrok agent web API for the current public HTTPS URL.
+    # Returns $null if the agent isn't up yet or no tunnel exists.
+    try {
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3 -ErrorAction Stop
+    }
+    catch { return $null }
+    if (-not $resp.tunnels) { return $null }
+    $https = $resp.tunnels | Where-Object { $_.public_url -like "https://*" } | Select-Object -First 1
+    if ($https) { return $https.public_url }
+    return ($resp.tunnels | Select-Object -First 1).public_url
+}
+
+function Stop-NgrokTunnel {
+    $procs = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+    if ($procs) {
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Ok "Stopped ngrok tunnel."
+    }
+}
+
+function Start-NgrokTunnel([int]$Port) {
+    # Starts an OUTBOUND ngrok tunnel to http://localhost:$Port and returns the
+    # public HTTPS URL (or $null on failure). ngrok connects out from this
+    # machine, so no inbound firewall rule / server IP / LAN routing is needed.
+    if (-not (Test-Command "ngrok")) {
+        Write-Warn "ngrok is not installed or not in PATH - skipping the tunnel (the app is still running locally)."
+        Write-Host "   Install it, then re-run with -Ngrok:" -ForegroundColor Gray
+        Write-Host "     winget install ngrok.ngrok    (or: choco install ngrok, or download from https://ngrok.com/download)" -ForegroundColor Gray
+        Write-Host "     ngrok config add-authtoken <YOUR_TOKEN>    (one-time; get it from https://dashboard.ngrok.com/get-started/your-authtoken)" -ForegroundColor Gray
+        return $null
+    }
+
+    # One-time auth-token setup if provided via env/.env (token is never echoed).
+    $token = [Environment]::GetEnvironmentVariable("NGROK_AUTHTOKEN")
+    if ($token) {
+        ngrok config add-authtoken $token *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "ngrok auth token configured from NGROK_AUTHTOKEN." }
+    }
+
+    # If an ngrok agent is already running, reuse its tunnel instead of
+    # launching a second one (only one agent can bind the 4040 API anyway).
+    $existing = Get-NgrokPublicUrl
+    if ($existing) {
+        Write-Ok "An ngrok tunnel is already running - reusing it."
+        return $existing
+    }
+
+    $ngrokArgs = @("http", "$Port", "--log", "stdout")
+    $domain = [Environment]::GetEnvironmentVariable("NGROK_DOMAIN")
+    if ($domain) { $ngrokArgs += @("--domain", $domain) }
+    $basicAuth = [Environment]::GetEnvironmentVariable("NGROK_BASIC_AUTH")
+    if ($basicAuth) { $ngrokArgs += @("--basic-auth", $basicAuth) }
+
+    $logFile = Join-Path $RepoRoot "ngrok.log"
+    Write-Step "Starting ngrok tunnel to http://localhost:$Port"
+    try {
+        Start-Process -FilePath "ngrok" -ArgumentList $ngrokArgs `
+            -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" `
+            -WindowStyle Hidden -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Warn "Failed to launch ngrok: $($_.Exception.Message)"
+        return $null
+    }
+
+    # Poll the local agent API for the public URL (it appears a moment after
+    # the agent authenticates and establishes the tunnel).
+    $deadline = (Get-Date).AddSeconds(25)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        $url = Get-NgrokPublicUrl
+        if ($url) { return $url }
+    }
+
+    Write-Warn "ngrok started but no public URL appeared within 25s."
+    foreach ($f in @($logFile, "$logFile.err")) {
+        if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+            Write-Host "   Last lines of $([System.IO.Path]::GetFileName($f)):" -ForegroundColor Gray
+            Get-Content $f -Tail 12 | ForEach-Object { Write-Host "   $_" -ForegroundColor Gray }
+        }
+    }
+    Write-Host "   Most common cause: no auth token configured. Run 'ngrok config add-authtoken <TOKEN>'" -ForegroundColor Gray
+    Write-Host "   or set NGROK_AUTHTOKEN in .env, then re-run with -Ngrok." -ForegroundColor Gray
+    return $null
+}
+
 function Wait-ServiceHealthy([string]$Service, [int]$TimeoutSeconds = 90) {
     Write-Host "Waiting for '$Service' to become healthy (timeout ${TimeoutSeconds}s)..." -ForegroundColor Yellow
     $cmd = Get-ComposeCmd
@@ -378,6 +483,7 @@ Write-Ok "Docker Compose is available"
 if ($Stop) {
     Write-Step "Stopping Project-Wrapped containers"
     Invoke-Compose @("stop")
+    Stop-NgrokTunnel
     Write-Ok "Containers stopped. Data volume is preserved."
     Write-Host "Run '.\setup-and-start.ps1' again to restart, or 'docker compose down' to also remove the (stopped) containers." -ForegroundColor Gray
     exit 0
@@ -629,5 +735,26 @@ if ($Https) {
     Write-Host "`nThe first visit will show a certificate warning (self-signed internal CA) -" -ForegroundColor Gray
     Write-Host "see README.md 'HTTPS / internal CA' to install the trusted root certificate." -ForegroundColor Gray
 }
+
+# ---------------------------------------------------------------------------
+# -Ngrok: outbound public tunnel (works through corporate firewall/VPN/VLAN
+# because ngrok connects OUT from this machine - no inbound access needed).
+# ---------------------------------------------------------------------------
+if ($Ngrok) {
+    $publicUrl = Start-NgrokTunnel -Port $port
+    if ($publicUrl) {
+        Write-Host "`n==================================================================" -ForegroundColor Green
+        Write-Host " PUBLIC URL (open this from ANY other PC - no VPN/firewall/IP needed):" -ForegroundColor Green
+        Write-Host "   $publicUrl" -ForegroundColor Cyan
+        Write-Host "==================================================================" -ForegroundColor Green
+        if (-not [Environment]::GetEnvironmentVariable("NGROK_BASIC_AUTH")) {
+            Write-Warn "This app has NO login and the tunnel is PUBLIC - anyone with the URL can use it (and any configured Azure DevOps PAT)."
+            Write-Host "   Protect it with a username/password: set NGROK_BASIC_AUTH=user:pass in .env, then -Stop and re-run with -Ngrok." -ForegroundColor Gray
+        }
+        Write-Host "   Local ngrok inspector/logs: http://127.0.0.1:4040" -ForegroundColor Gray
+        Write-Host "   The tunnel keeps running in the background until you run '.\setup-and-start.ps1 -Stop'." -ForegroundColor Gray
+    }
+}
+
 Write-Host "`nStop with:   .\setup-and-start.ps1 -Stop" -ForegroundColor Gray
 Write-Host "Update with: git pull; .\setup-and-start.ps1" -ForegroundColor Gray

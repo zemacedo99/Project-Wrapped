@@ -137,6 +137,7 @@ See [Internet / production deployment](#internet--production-deployment) below f
 |---|---|---|
 | *(none)* | *(none)* | **Recommended.** Build/start database + app in Docker over plain HTTP (reachable at `http://<lan-ip>:5000`) |
 | `-Https` | `--https` | Also start the Caddy reverse proxy for HTTPS on port 443 (self-signed internal CA) |
+| `-Ngrok` | `--ngrok` | Also open a public **outbound** ngrok tunnel and print an `https://…ngrok…` URL that works through corporate firewalls/VPNs/VLANs (no inbound access needed) |
 | `-Dev` | `--dev` | Local development: DB in Docker, app on the host with hot reload (requires Node.js) |
 | `-Stop` | `--stop` | Stop the running containers (data preserved) |
 | `-ResetDatabase` | `--reset-database` | **Destructive.** Deletes the local database volume. Asks for confirmation unless `-Force` / `--force` is also given |
@@ -261,6 +262,49 @@ If the other PC cannot connect, check, in order:
 
 Prefer HTTPS? Start with `-Https` and read [HTTPS / internal CA](#https--internal-ca)
 for the extra certificate step each client needs.
+
+### Remote access via ngrok (through a corporate firewall / VPN / VLAN)
+
+If the server PC is reachable to you only over RDP/AnyDesk and corporate
+firewall, VPN or VLAN rules block opening port `5000`/`443` directly from your
+own machine, stop fighting inbound access and use an **outbound** ngrok tunnel
+instead. ngrok connects *out* from the server and hands you a public HTTPS URL
+that works from anywhere - no inbound firewall rule, correct server IP, or LAN
+routing required.
+
+**One-time setup on the server PC:**
+
+1. Install ngrok: `winget install ngrok.ngrok` (or `choco install ngrok`, or download from <https://ngrok.com/download>).
+2. Create a free account and copy your auth token from <https://dashboard.ngrok.com/get-started/your-authtoken>.
+3. Either run `ngrok config add-authtoken <TOKEN>` once, or put `NGROK_AUTHTOKEN=<TOKEN>` in [.env](.env) (git-ignored).
+
+**Every time you want remote access:**
+
+```powershell
+.\setup-and-start.ps1 -Ngrok
+```
+
+The script starts the database + app, confirms the app is healthy locally,
+starts the tunnel, and prints:
+
+```
+ PUBLIC URL (open this from ANY other PC - no VPN/firewall/IP needed):
+   https://<random>.ngrok-free.app
+```
+
+Open that URL in the browser on your own PC. The tunnel runs in the background
+until you run `.\setup-and-start.ps1 -Stop` (which also stops the tunnel).
+Inspect live requests at <http://127.0.0.1:4040> on the server.
+
+> **Security:** the app has **no login**, so a public ngrok URL is reachable by
+> anyone who has it (and can use any configured `AZURE_DEVOPS_PAT`). Protect it
+> with HTTP Basic Auth by setting `NGROK_BASIC_AUTH=user:password` in `.env` -
+> ngrok then prompts every visitor for those credentials before allowing
+> access. For a stable URL that doesn't change each restart (paid ngrok
+> feature), set `NGROK_DOMAIN=<your-reserved-domain>`. On the free plan the
+> first visit shows an ngrok interstitial page - click through once to continue.
+
+macOS/Linux/WSL: `./setup-and-start.sh --ngrok` (same behaviour).
 
 ### HTTPS / internal CA
 
