@@ -206,6 +206,8 @@ function mergeCanonical(canonical: Contributor, aliases: Contributor[]): Contrib
     pullRequestsReviewed: sum("pullRequestsReviewed"),
     commentsWritten: sum("commentsWritten"),
     bugsFixed: sum("bugsFixed"),
+    bugsResolved: sum("bugsResolved"),
+    bugsValidated: sum("bugsValidated"),
     storyPointsDone: sum("storyPointsDone"),
     linesAdded: sum("linesAdded"),
     linesDeleted: sum("linesDeleted"),

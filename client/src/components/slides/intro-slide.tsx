@@ -35,7 +35,7 @@ export function IntroSlide({ data }: IntroSlideProps) {
           <div className="flex items-center justify-center gap-2 mb-6">
             <Sparkles className="w-6 h-6 text-primary animate-pulse" />
             <span className="text-sm font-medium uppercase tracking-widest text-muted-foreground">
-              Year in Review
+              Project in Review
             </span>
             <Sparkles className="w-6 h-6 text-accent animate-pulse" />
           </div>

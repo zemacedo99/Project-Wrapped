@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import {
   isDoneState,
   isBugFixed,
+  isResolvedState,
+  isValidatedState,
+  extractBugStateActors,
   completedStoryPoints,
   withinRange,
   aggregateContributorStats,
@@ -19,6 +22,8 @@ import {
   type AzureDevOpsCommit,
   type AzureDevOpsPullRequest,
   type AzureDevOpsWorkItem,
+  type AzureDevOpsWorkItemUpdate,
+  type BugStateActor,
 } from "./azure-devops";
 import { projectWrappedDataSchema } from "../../shared/schema";
 
@@ -128,6 +133,99 @@ describe("isBugFixed", () => {
   test("a completed non-Bug is not a fixed bug", () => {
     assert.equal(isBugFixed(workItem({ type: "Task", state: "Done" })), false);
     assert.equal(isBugFixed(workItem({ type: "User Story", state: "Closed" })), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. Bug Slayer (resolved) vs Validation Hero (validated) — state-transition actor
+// ---------------------------------------------------------------------------
+
+// Build one work item update (a single revision) that changes System.State.
+function stateChange(actor: string, newValue: string, oldValue?: string): AzureDevOpsWorkItemUpdate {
+  return {
+    revisedBy: { displayName: actor, uniqueName: `${actor.trim().toLowerCase().replace(/\s+/g, ".")}@x.io` },
+    fields: { "System.State": { oldValue, newValue } },
+  };
+}
+
+describe("isResolvedState / isValidatedState", () => {
+  test("Resolved is the developer transition; Done/Closed/Completed are validation", () => {
+    assert.equal(isResolvedState("Resolved"), true);
+    assert.equal(isResolvedState(" resolved "), true);
+    assert.equal(isResolvedState("Done"), false);
+    for (const s of ["Done", "Closed", "Completed", "done"]) {
+      assert.equal(isValidatedState(s), true, `expected "${s}" validated`);
+    }
+    assert.equal(isValidatedState("Resolved"), false);
+    assert.equal(isValidatedState("Active"), false);
+  });
+});
+
+describe("extractBugStateActors", () => {
+  test("credits the actual person who moved the bug into each state", () => {
+    const actors = extractBugStateActors([
+      stateChange("Dev", "Active", "New"),
+      stateChange("Dev", "Resolved", "Active"),
+      stateChange("Tester", "Done", "Resolved"),
+    ]);
+    assert.equal(actors.resolvedBy, "Dev");
+    assert.equal(actors.validatedBy, "Tester");
+  });
+
+  test("no transition into resolved/validated -> no credit", () => {
+    const actors = extractBugStateActors([stateChange("Dev", "Active", "New")]);
+    assert.equal(actors.resolvedBy, undefined);
+    assert.equal(actors.validatedBy, undefined);
+  });
+
+  test("the LAST actor into each state wins (e.g. reopened then re-validated)", () => {
+    const actors = extractBugStateActors([
+      stateChange("Dev A", "Resolved", "Active"),
+      stateChange("Tester A", "Done", "Resolved"),
+      stateChange("Dev B", "Resolved", "Active"), // reopened + resolved again
+      stateChange("Tester B", "Closed", "Resolved"),
+    ]);
+    assert.equal(actors.resolvedBy, "Dev B");
+    assert.equal(actors.validatedBy, "Tester B");
+  });
+
+  test("ignores revisions that don't touch System.State", () => {
+    const actors = extractBugStateActors([{ revisedBy: { displayName: "Someone" }, fields: {} }]);
+    assert.equal(actors.resolvedBy, undefined);
+    assert.equal(actors.validatedBy, undefined);
+  });
+});
+
+describe("aggregateContributorStats credits bugs by transition actor, not assignee", () => {
+  test("resolved -> developer, validated -> tester (assignee is neither)", () => {
+    const bug = workItem({ id: 42, type: "Bug", state: "Done", assignee: "Product Owner" });
+    const bugActors = new Map<number, BugStateActor>([
+      [42, { resolvedBy: "Dev", validatedBy: "Tester" }],
+    ]);
+
+    const stats = aggregateContributorStats([], [], [bug], NO_MERGE, NO_STREAK, bugActors);
+
+    const dev = findContributor(stats, "Dev");
+    const tester = findContributor(stats, "Tester");
+    const po = findContributor(stats, "Product Owner");
+
+    assert.equal(dev?.bugsResolved, 1, "developer credited with the resolve");
+    assert.equal(dev?.bugsValidated ?? 0, 0, "developer not credited with validation");
+    assert.equal(tester?.bugsValidated, 1, "tester credited with the validation");
+    assert.equal(tester?.bugsResolved ?? 0, 0, "tester not credited with the resolve");
+    // The current assignee gets the "fixed" (current-state) count but no resolve/validate credit.
+    assert.equal(po?.bugsFixed, 1);
+    assert.equal(po?.bugsResolved ?? 0, 0);
+    assert.equal(po?.bugsValidated ?? 0, 0);
+  });
+
+  test("without history no one is credited resolved/validated", () => {
+    const bug = workItem({ id: 7, type: "Bug", state: "Done", assignee: "Dev" });
+    const stats = aggregateContributorStats([], [], [bug], NO_MERGE, NO_STREAK);
+    const dev = findContributor(stats, "Dev");
+    assert.equal(dev?.bugsFixed, 1);
+    assert.equal(dev?.bugsResolved ?? 0, 0);
+    assert.equal(dev?.bugsValidated ?? 0, 0);
   });
 });
 
@@ -599,6 +697,16 @@ describe("canonicalizeContributors", () => {
     ]);
     assert.equal(canon.length, 1);
     assert.equal(canon[0].commits, 15);
+  });
+
+  test("bugsResolved / bugsValidated are summed across merged identities", () => {
+    const canon = canonicalizeContributors([
+      person("dev", { commits: 3, email: "d@x.io", source: "git", bugsResolved: 2 }),
+      person("Dev", { commits: 1, uniqueName: "d@x.io", source: "azure", bugsResolved: 3, bugsValidated: 4 }),
+    ]);
+    assert.equal(canon.length, 1);
+    assert.equal(canon[0].bugsResolved, 5);
+    assert.equal(canon[0].bugsValidated, 4);
   });
 
   test("an unmatched git identity stays separate and is flagged isUnmappedGit", () => {

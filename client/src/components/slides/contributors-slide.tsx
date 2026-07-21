@@ -11,6 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { sortContributors, filterContributors, type ContribSort } from "@/lib/wrapped-config";
 import { Users, GitCommit, GitPullRequest, Eye, Bug, Target, GitBranch } from "lucide-react";
 
@@ -140,6 +142,8 @@ function ContributorDetails({
             <DetailRow label="Bugs fixed" value={contributor.bugsFixed} />
             {showStoryPoints && <DetailRow label="Story points" value={contributor.storyPointsDone} />}
             {contributor.longestStreak ? <DetailRow label="Longest streak" value={contributor.longestStreak} /> : null}
+            {contributor.bugsResolved ? <DetailRow label="Bugs resolved" value={contributor.bugsResolved} /> : null}
+            {contributor.bugsValidated ? <DetailRow label="Bugs validated" value={contributor.bugsValidated} /> : null}
           </div>
 
           <div>
@@ -164,7 +168,9 @@ function ContributorDetails({
               <p className="text-xs text-muted-foreground">Single identity — no linked aliases.</p>
             )}
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Bug “resolved vs validated” per person needs work item history (not fetched yet).
+              “Bugs resolved” (developer) and “bugs validated” (tester) are read from work item
+              history and credited to whoever performed each state change. “Bugs fixed” counts bugs
+              currently in a completed state.
             </p>
           </div>
         </div>
@@ -177,12 +183,18 @@ export function ContributorsSlide({ contributors, showStoryPoints = false }: Con
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.1 });
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<ContribSort>("commits");
+  const [azureOnly, setAzureOnly] = useState(false);
   const [selected, setSelected] = useState<Contributor | null>(null);
 
   const visible = useMemo(() => {
     const filtered = filterContributors(contributors, "all", search);
-    return sortContributors(filtered, sort);
-  }, [contributors, search, sort]);
+    // "Azure accounts only": hide standalone git aliases that never matched an
+    // Azure DevOps account. Commits from git aliases that DID map to an Azure
+    // account are already summed into that account by the identity logic, so
+    // this only removes truly unmapped git identities.
+    const scoped = azureOnly ? filtered.filter(c => !c.isUnmappedGit) : filtered;
+    return sortContributors(scoped, sort);
+  }, [contributors, search, sort, azureOnly]);
 
   if (!contributors || contributors.length === 0) return null;
 
@@ -219,19 +231,32 @@ export function ContributorsSlide({ contributors, showStoryPoints = false }: Con
             className="sm:max-w-xs"
             data-testid="team-search"
           />
-          <Select value={sort} onValueChange={(v) => setSort(v as ContribSort)}>
-            <SelectTrigger className="sm:w-56" data-testid="team-sort">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="commits">Most commits</SelectItem>
-              <SelectItem value="prs">Most PRs</SelectItem>
-              <SelectItem value="reviews">Most reviews</SelectItem>
-              <SelectItem value="bugs">Most bugs fixed</SelectItem>
-              {showStoryPoints && <SelectItem value="storyPoints">Most story points</SelectItem>}
-              <SelectItem value="name">Name (A–Z)</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-3 sm:justify-end">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="team-azure-only"
+                checked={azureOnly}
+                onCheckedChange={setAzureOnly}
+                data-testid="team-azure-only"
+              />
+              <Label htmlFor="team-azure-only" className="text-sm text-muted-foreground whitespace-nowrap">
+                Azure accounts only
+              </Label>
+            </div>
+            <Select value={sort} onValueChange={(v) => setSort(v as ContribSort)}>
+              <SelectTrigger className="sm:w-56" data-testid="team-sort">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="commits">Most commits</SelectItem>
+                <SelectItem value="prs">Most PRs</SelectItem>
+                <SelectItem value="reviews">Most reviews</SelectItem>
+                <SelectItem value="bugs">Most bugs fixed</SelectItem>
+                {showStoryPoints && <SelectItem value="storyPoints">Most story points</SelectItem>}
+                <SelectItem value="name">Name (A–Z)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 max-h-[60vh] overflow-y-auto pr-1">
@@ -253,7 +278,11 @@ export function ContributorsSlide({ contributors, showStoryPoints = false }: Con
           </p>
         )}
         {visible.length === 0 && (
-          <p className="mt-6 text-center text-muted-foreground">No team members match “{search}”.</p>
+          <p className="mt-6 text-center text-muted-foreground">
+            {search
+              ? `No team members match “${search}”.`
+              : "No Azure DevOps accounts to show."}
+          </p>
         )}
       </div>
 

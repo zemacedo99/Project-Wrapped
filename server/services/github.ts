@@ -107,7 +107,9 @@ export async function fetchGitHubData(config: GitHubConfig): Promise<ProjectWrap
     totalBugsFixed: issues.filter(i => i.labels.some(l => l.name.toLowerCase().includes("bug")) && i.state === "closed").length,
     // GitHub issues carry no story points; we don't invent a value from closed-issue counts.
     totalStoryPointsDone: 0,
-    sprintsCompleted: Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)),
+    // GitHub has no sprint/iteration concept here; we don't estimate one from the
+    // date range (cadence varies), so the UI hides the sprint text.
+    sprintsCompleted: 0,
   };
 
   // Completeness: the GitHub fetch is capped by paging limits, so flag when a

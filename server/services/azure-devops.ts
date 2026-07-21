@@ -69,6 +69,28 @@ export interface AzureDevOpsWorkItem {
   };
 }
 
+// A single revision from a work item's update history (/wit/workItems/{id}/updates).
+// `revisedBy` is the person who made the change; `fields` holds the before/after
+// value for each field touched by that revision.
+export interface AzureDevOpsWorkItemUpdate {
+  revisedBy?: {
+    displayName?: string;
+    uniqueName?: string;
+  };
+  fields?: {
+    "System.State"?: { oldValue?: string; newValue?: string };
+  };
+}
+
+// Who moved a bug into a "Resolved" state and who moved it into a validated
+// ("Done"/"Closed"/"Completed") state — the real state-transition actors.
+export interface BugStateActor {
+  resolvedBy?: string;
+  resolvedByUnique?: string;
+  validatedBy?: string;
+  validatedByUnique?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Metric definitions
 // Every KPI is derived here so the numbers are computed consistently across the
@@ -95,6 +117,47 @@ export function isBug(wi: AzureDevOpsWorkItem): boolean {
 // A bug counts as "fixed" when it is a Bug work item in a completed state.
 export function isBugFixed(wi: AzureDevOpsWorkItem): boolean {
   return isBug(wi) && isDoneState(wi.fields["System.State"]);
+}
+
+// Custom bug workflow split used only for the "Bug Slayer" (developer) vs
+// "Validation Hero" (tester) attribution:
+//   • a developer moves a bug to "Resolved"
+//   • a tester/validator moves it to a final state ("Done"/"Closed"/"Completed")
+// These credits are based on the ACTUAL state-transition actor read from work
+// item history (see extractBugStateActors), never the current assignee.
+const RESOLVED_STATES = new Set(["resolved"]);
+const VALIDATED_STATES = new Set(["done", "closed", "completed"]);
+
+export function isResolvedState(state?: string): boolean {
+  return !!state && RESOLVED_STATES.has(state.trim().toLowerCase());
+}
+
+export function isValidatedState(state?: string): boolean {
+  return !!state && VALIDATED_STATES.has(state.trim().toLowerCase());
+}
+
+// From a bug's full update history, find who moved it INTO a Resolved state and
+// who moved it INTO a validated (Done/Closed/Completed) state. Returns the last
+// person to perform each transition — the actor Azure DevOps recorded on the
+// revision — or undefined when that transition never happened. This is the
+// state-transition actor, deliberately NOT the current assignee.
+export function extractBugStateActors(updates: AzureDevOpsWorkItemUpdate[]): BugStateActor {
+  const result: BugStateActor = {};
+  for (const u of updates) {
+    const change = u.fields?.["System.State"];
+    if (!change) continue;
+    const to = change.newValue;
+    const actor = u.revisedBy?.displayName?.trim();
+    if (!to || !actor) continue;
+    if (isResolvedState(to)) {
+      result.resolvedBy = actor;
+      result.resolvedByUnique = u.revisedBy?.uniqueName?.trim().toLowerCase();
+    } else if (isValidatedState(to)) {
+      result.validatedBy = actor;
+      result.validatedByUnique = u.revisedBy?.uniqueName?.trim().toLowerCase();
+    }
+  }
+  return result;
 }
 
 // Story points are only credited once the work item reaches a completed state,
@@ -209,6 +272,9 @@ export interface ImportCompleteness {
   workItemIdsFound: number; // work item ids discovered via WIQL
   workItemDetailsFetched: number; // work items whose details we actually loaded
   workItemDetailBatchesFailed: number; // detail batches that failed and were skipped
+  bugHistoryRequested: number; // bugs whose state history we attempted to read
+  bugHistoryFetched: number; // bugs whose state history we successfully read
+  bugHistoryFailed: number; // bugs whose state-history call threw and was skipped
   commitFailures: RepoFailure[]; // per-repo commit failure diagnostics
   pullRequestFailures: RepoFailure[]; // per-repo PR failure diagnostics
 }
@@ -225,6 +291,9 @@ export function newCompleteness(): ImportCompleteness {
     workItemIdsFound: 0,
     workItemDetailsFetched: 0,
     workItemDetailBatchesFailed: 0,
+    bugHistoryRequested: 0,
+    bugHistoryFetched: 0,
+    bugHistoryFailed: 0,
     commitFailures: [],
     pullRequestFailures: [],
   };
@@ -284,6 +353,15 @@ export function summarizeCompleteness(c: ImportCompleteness): CompletenessSummar
     if (c.workItemDetailBatchesFailed > 0 || missing > 0) {
       warnings.push(
         `${missing.toLocaleString()} of ${c.workItemIdsFound.toLocaleString()} work items could not be loaded and are excluded, so bug and story-point numbers are undercounted.`
+      );
+    }
+  }
+
+  if (c.bugHistoryRequested > 0) {
+    const missing = Math.max(0, c.bugHistoryRequested - c.bugHistoryFetched);
+    if (missing > 0) {
+      warnings.push(
+        `Bug state history could not be read for ${missing.toLocaleString()} of ${c.bugHistoryRequested.toLocaleString()} bugs, so the "Resolved by" / "Validated by" credits for those bugs are missing.`
       );
     }
   }
@@ -418,10 +496,17 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
   const repoStats = aggregateRepositoryStats(commits, pullRequests, repositories);
   const workItemBreakdown = aggregateWorkItemTypes(workItems);
 
+  // Read the real state-transition actors for bugs (who moved each bug to
+  // Resolved vs. to a validated state) so "Bug Slayer" and "Validation Hero" are
+  // credited to the actual person, not the current assignee. Non-fatal: any
+  // failures are disclosed via completeness, and bugs stay uncredited.
+  const bugs = workItems.filter(isBug);
+  const bugActors = await fetchBugStateActors(config, bugs, tracker);
+
   // Aggregate per raw identity, then merge into canonical people so the same
   // human isn't split across git/Azure identities. Every contributor-based
   // section (Champions, Top 5, Team) is computed from this one canonical set.
-  const rawContributors = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData);
+  const rawContributors = aggregateContributorStats(commits, pullRequests, workItems, prMergeStats, streakData, bugActors);
   const contributorStats = canonicalizeContributors(rawContributors);
   const moduleStats = aggregateModuleStats(workItems);
   const top5 = calculateTop5(contributorStats, commits, streakData);
@@ -444,11 +529,12 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     totalComments: 0,
     totalBugsFixed: workItems.filter(isBugFixed).length,
     totalStoryPointsDone: workItems.reduce((acc, wi) => acc + completedStoryPoints(wi), 0),
-    // Prefer real Azure DevOps iterations overlapping the range; fall back to a
-    // two-week estimate only when iterations aren't available.
+    // Real Azure DevOps iterations overlapping the range. We never estimate a
+    // sprint count from the date range (cadence varies — 2 or 3 weeks), so when
+    // iterations can't be read this stays 0 and the UI hides the sprint text.
     sprintsCompleted: iterations.length > 0
       ? countIterationsInRange(iterations, dateFrom, dateTo)
-      : (dateFrom && dateTo ? Math.floor((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (14 * 24 * 60 * 60 * 1000)) : 0),
+      : 0,
     totalRepositories: repositories.length,
     avgPrMergeTimeHours: prMergeStats.avgMergeTimeHours,
     fastestPrMergeTimeHours: prMergeStats.fastestMergeTimeHours,
@@ -508,6 +594,8 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
     definitions: [
       `Work items counted: every work item type (Tasks included), in any state, filtered by created date (System.CreatedDate) when a date range is set, scoped to this project. Repository selection does not change work items — they are project-scoped in Azure DevOps.`,
       `Bugs fixed: work items of type "Bug" in a completed state (${DONE_STATES_LABEL}) — based on current state, not on who resolved vs. validated them.`,
+      `Bug Slayer (bugs resolved): bugs a developer moved into the "Resolved" state, credited to the person who performed that transition (from work item history), not the current assignee.`,
+      `Validation Hero (bugs validated): bugs a tester moved into a validated state (Done/Closed/Completed), credited to the person who performed that transition (from work item history), not the current assignee.`,
       `Story points: sum of Story Points on work items in a completed state (${DONE_STATES_LABEL}).`,
       "Code reviews: reviewers who cast a vote (approved, approved w/ suggestions, waiting or rejected) on a PR.",
       "PR merge rate: completed PRs ÷ all PRs in range.",
@@ -522,11 +610,11 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
         : []),
       "PR discussion comments and lines-added/deleted are not collected — scanning every PR thread at project scale is too slow, so those metrics are intentionally omitted rather than shown partially.",
       "Contributors are unified into one person per Azure DevOps account by matching email / unique name, then exact display name. Commits from linked git identities are summed into that person; git identities with no Azure match are shown separately and can be linked manually in Settings → Contributors.",
-      "Bug 'resolved by developer' vs 'validated by tester' needs work item history (who moved the state), which is not fetched yet — bug counts reflect the current state only and are attributed to the current assignee.",
+      "Bug 'resolved by developer' (Bug Slayer) and 'validated by tester' (Validation Hero) are read from each bug's work item history and credited to the person who performed that state transition — not the current assignee. Bugs whose history could not be read carry no such credit (see completeness warnings).",
       "Activity hours (busiest hour, night owl / early bird) are computed in the server's local timezone.",
       iterations.length > 0
         ? `Sprints completed = the ${totalStats.sprintsCompleted} Azure DevOps iteration(s) overlapping the selected range (real iterations, not an estimate).`
-        : "Sprints completed is estimated from the date range assuming a two-week cadence — real Azure DevOps iterations could not be read for this project.",
+        : "Sprint count is hidden: real Azure DevOps iterations could not be read for this project, and sprint length is not fixed (2–3 weeks), so it is not estimated from the date range.",
     ],
     completeness: summarizeCompleteness(tracker),
   };
@@ -1058,12 +1146,57 @@ async function fetchWorkItems(
   }
 }
 
+// Read the state-transition actors for a set of bugs from their update history.
+// There is no batch "updates" API, so this makes one call per bug (with limited
+// concurrency) — it is therefore only run over Bug work items, never the whole
+// backlog. Every call is non-fatal: a failure is tracked in `completeness` and
+// that bug simply carries no Resolved/Validated credit rather than failing the
+// whole import. Returns a map of work item id -> actors.
+async function fetchBugStateActors(
+  config: AzureDevOpsConfig,
+  bugs: AzureDevOpsWorkItem[],
+  tracker?: ImportCompleteness
+): Promise<Map<number, BugStateActor>> {
+  const result = new Map<number, BugStateActor>();
+  if (bugs.length === 0) return result;
+
+  if (tracker) tracker.bugHistoryRequested = bugs.length;
+  console.log(`[Azure DevOps] Reading state history for ${bugs.length} bugs...`);
+
+  const concurrency = 5;
+  for (let i = 0; i < bugs.length; i += concurrency) {
+    const slice = bugs.slice(i, i + concurrency);
+    const settled = await Promise.all(
+      slice.map(async bug => {
+        try {
+          const data = await fetchAzureDevOps<{ value: AzureDevOpsWorkItemUpdate[] }>(
+            config,
+            `/wit/workItems/${bug.id}/updates`
+          );
+          return { id: bug.id, actors: extractBugStateActors(data.value || []) };
+        } catch {
+          if (tracker) tracker.bugHistoryFailed++;
+          return null;
+        }
+      })
+    );
+    for (const s of settled) {
+      if (s) result.set(s.id, s.actors);
+    }
+  }
+
+  if (tracker) tracker.bugHistoryFetched = result.size;
+  console.log(`[Azure DevOps] Read bug state history for ${result.size}/${bugs.length} bugs`);
+  return result;
+}
+
 export function aggregateContributorStats(
   commits: AzureDevOpsCommit[],
   pullRequests: AzureDevOpsPullRequest[],
   workItems: AzureDevOpsWorkItem[],
   prMergeStats: { mergeTimeByAuthor: Map<string, number[]> },
-  streakData: { streaksByAuthor: Map<string, number> }
+  streakData: { streaksByAuthor: Map<string, number> },
+  bugActors: Map<number, BugStateActor> = new Map()
 ): Contributor[] {
   const contributorMap = new Map<string, Contributor>();
 
@@ -1081,6 +1214,8 @@ export function aggregateContributorStats(
         pullRequestsReviewed: 0,
         commentsWritten: 0,
         bugsFixed: 0,
+        bugsResolved: 0,
+        bugsValidated: 0,
         storyPointsDone: 0,
         linesAdded: 0,
         linesDeleted: 0,
@@ -1143,6 +1278,27 @@ export function aggregateContributorStats(
     c.storyPointsDone += completedStoryPoints(wi);
   }
 
+  // Bug Slayer / Validation Hero: credited to the ACTUAL person who moved each
+  // bug to Resolved / to a validated state (from work item history), not the
+  // current assignee. Only bugs whose history was read appear here.
+  for (const wi of workItems) {
+    if (!isBug(wi)) continue;
+    const actors = bugActors.get(wi.id);
+    if (!actors) continue;
+    if (actors.resolvedBy) {
+      const rc = ensure(actors.resolvedBy);
+      if (!rc.uniqueName && actors.resolvedByUnique) rc.uniqueName = actors.resolvedByUnique;
+      markSource(rc, "azure");
+      rc.bugsResolved = (rc.bugsResolved || 0) + 1;
+    }
+    if (actors.validatedBy) {
+      const vc = ensure(actors.validatedBy);
+      if (!vc.uniqueName && actors.validatedByUnique) vc.uniqueName = actors.validatedByUnique;
+      markSource(vc, "azure");
+      vc.bugsValidated = (vc.bugsValidated || 0) + 1;
+    }
+  }
+
   // Add PR merge time and streak data
   Array.from(contributorMap.entries()).forEach(([name, contributor]) => {
     // Average PR merge time
@@ -1193,6 +1349,8 @@ function mergePeople(members: Contributor[]): Contributor {
     pullRequestsReviewed: sum("pullRequestsReviewed"),
     commentsWritten: sum("commentsWritten"),
     bugsFixed: sum("bugsFixed"),
+    bugsResolved: sum("bugsResolved"),
+    bugsValidated: sum("bugsValidated"),
     storyPointsDone: sum("storyPointsDone"),
     linesAdded: sum("linesAdded"),
     linesDeleted: sum("linesDeleted"),

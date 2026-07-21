@@ -3,7 +3,7 @@ import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useAnimatedCounter, formatNumber } from "@/hooks/use-animated-counter";
 import type { Contributor } from "@shared/schema";
 import { Card } from "@/components/ui/card";
-import { Trophy, Crown, MessageCircle, GitPullRequest, Bug, Zap } from "lucide-react";
+import { Trophy, Crown, MessageCircle, GitPullRequest, Bug, Zap, ShieldCheck } from "lucide-react";
 
 interface ChampionsSlideProps {
   contributors: Contributor[];
@@ -103,8 +103,8 @@ function findChampion(
   key: keyof Contributor
 ): Contributor | undefined {
   return contributors.reduce((prev, current) => {
-    const prevValue = prev[key] as number;
-    const currentValue = current[key] as number;
+    const prevValue = (prev[key] as number) || 0;
+    const currentValue = (current[key] as number) || 0;
     return currentValue > prevValue ? current : prev;
   }, contributors[0]);
 }
@@ -117,7 +117,8 @@ export function ChampionsSlide({ contributors }: ChampionsSlideProps) {
   const reviewChampion = findChampion(contributors, "pullRequestsReviewed");
   const commentsChampion = findChampion(contributors, "commentsWritten");
   const commitChampion = findChampion(contributors, "commits");
-  const bugSlayer = findChampion(contributors, "bugsFixed");
+  const bugSlayer = findChampion(contributors, "bugsResolved");
+  const validationHero = findChampion(contributors, "bugsValidated");
 
   return (
     <section
@@ -208,13 +209,13 @@ export function ChampionsSlide({ contributors }: ChampionsSlideProps) {
             />
           )}
 
-          {bugSlayer && bugSlayer.bugsFixed > 0 && (
+          {bugSlayer && (bugSlayer.bugsResolved ?? 0) > 0 && (
             <ChampionCard
               title="Bug Slayer"
-              subtitle="Debugging Hero"
+              subtitle="Resolved the most bugs"
               name={bugSlayer.name}
-              statValue={bugSlayer.bugsFixed}
-              statLabel="Bugs Fixed"
+              statValue={bugSlayer.bugsResolved ?? 0}
+              statLabel="Bugs Resolved"
               icon={<Bug className="w-5 h-5 text-destructive" />}
               badge={
                 <div className="w-12 h-12 rounded-full bg-gradient-to-br from-destructive to-accent flex items-center justify-center shadow-lg">
@@ -224,6 +225,26 @@ export function ChampionsSlide({ contributors }: ChampionsSlideProps) {
               gradientFrom="hsl(0 72% 51%)"
               gradientTo="hsl(330 81% 60%)"
               delay={450}
+              isVisible={isVisible}
+            />
+          )}
+
+          {validationHero && (validationHero.bugsValidated ?? 0) > 0 && (
+            <ChampionCard
+              title="Validation Hero"
+              subtitle="Validated the most bugs"
+              name={validationHero.name}
+              statValue={validationHero.bugsValidated ?? 0}
+              statLabel="Bugs Validated"
+              icon={<ShieldCheck className="w-5 h-5 text-chart-2" />}
+              badge={
+                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-chart-2 to-chart-3 flex items-center justify-center shadow-lg">
+                  <ShieldCheck className="w-6 h-6 text-white" />
+                </div>
+              }
+              gradientFrom="hsl(160 84% 39%)"
+              gradientTo="hsl(199 89% 48%)"
+              delay={600}
               isVisible={isVisible}
             />
           )}

@@ -59,8 +59,9 @@ JSON export/import; see [wrapped-config.ts](client/src/lib/wrapped-config.ts).
   definitions, caveats) is attached to every generated wrap and surfaced in the UI via a
   "How these numbers were calculated" panel under **The Numbers**.
 - **Units bug fixed.** Global-stats cards now render their suffix ("h", "days").
-- **Honest sprint label.** The timeline no longer asserts a fabricated sprint count; it
-  shows "~N two-week sprints (estimated)" or falls back to elapsed months.
+- **Honest sprint label.** The timeline never estimates a sprint count from the date range
+  (cadence varies, 2–3 weeks). It shows the real number of Azure DevOps iterations overlapping
+  the range when available, otherwise it shows elapsed months only and hides the sprint count.
 - **GitHub honesty.** Stopped inventing story points from closed-issue counts and stopped
   counting *pending* reviewers as completed reviews.
 
@@ -210,8 +211,9 @@ Each task lists **Goal · Why it matters · Approach · Acceptance criteria.**
 - **What was implemented:** `fetchIterations()` reads the project-level classification-nodes
   iterations tree (`/wit/classificationnodes/iterations?$depth=10`) — no team context needed —
   and `countIterationsInRange()` counts iterations overlapping the selected date range.
-  `sprintsCompleted` uses this real count when iterations exist and falls back to the two-week
-  estimate otherwise; the provenance note states which was used. Tested (`countIterationsInRange`).
+  `sprintsCompleted` uses this real count when iterations exist; when they cannot be read it is
+  set to 0 and the Timeline hides the sprint count entirely (no date-range estimate — cadence
+  varies 2–3 weeks). The provenance note states which was used. Tested (`countIterationsInRange`).
 - **Remaining:** show real sprint *names* on the Timeline (currently a count only).
 
 ### P1.2 — Add repository name to commits so per-repo stats populate
@@ -416,7 +418,8 @@ Documented here (and, where user-facing, in the in-app provenance panel):
 - **Comments** and **lines added/deleted / files changed** are not collected (too slow at
   project scale) and are intentionally omitted.
 - **Activity hours** are computed in the server timezone (see P0.4).
-- **Sprints completed** is an estimate from the date range (see P1.1).
+- **Sprints completed** is the real count of Azure DevOps iterations overlapping the range,
+  or hidden when iterations can't be read — never estimated from the date range (see P1.1).
 - **Contributor identity** is not yet unified across sources (see P0.1).
 
 ---

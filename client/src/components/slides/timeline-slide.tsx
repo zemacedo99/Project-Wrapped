@@ -41,9 +41,10 @@ function formatDate(dateString: string): string {
 export function TimelineSlide({ milestones, dateRange, sprintsCompleted }: TimelineSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.15 });
 
-  // Prefer an honest duration over a fabricated sprint count. `sprintsCompleted`
-  // is an estimate (date range ÷ two weeks), so label it as such; when it is not
-  // available fall back to the real elapsed months.
+  // Honest duration first. `sprintsCompleted` is only ever the real count of
+  // Azure DevOps iterations overlapping the range (0 when iterations couldn't be
+  // read); it is never estimated from the date range, so we only mention sprints
+  // when we actually have real ones — otherwise we just show elapsed months.
   const monthsBetween = (() => {
     const s = new Date(dateRange.start).getTime();
     const e = new Date(dateRange.end).getTime();
@@ -51,10 +52,11 @@ export function TimelineSlide({ milestones, dateRange, sprintsCompleted }: Timel
     return Math.max(1, Math.round((e - s) / (30.44 * 24 * 60 * 60 * 1000)));
   })();
 
+  const durationText = `${monthsBetween} month${monthsBetween === 1 ? "" : "s"} of building, breaking, and shipping`;
   const cadenceText =
     sprintsCompleted > 0
-      ? `~${sprintsCompleted} two-week sprints (estimated) of building, breaking, and shipping`
-      : `${monthsBetween} month${monthsBetween === 1 ? "" : "s"} of building, breaking, and shipping`;
+      ? `${sprintsCompleted.toLocaleString()} sprint${sprintsCompleted === 1 ? "" : "s"} · ${durationText}`
+      : durationText;
 
   return (
     <section
