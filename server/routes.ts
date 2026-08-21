@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { projectWrappedDataSchema } from "@shared/schema";
 import { fetchAzureDevOpsData, validateAzureDevOpsConfig, testAzureDevOpsConnection } from "./services/azure-devops";
 import { fetchGitHubData, validateGitHubConfig } from "./services/github";
+import { createAuth } from "./services/cloudflare-access";
 import multer from "multer";
 
 const upload = multer({ 
@@ -36,10 +37,28 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // Minimal liveness/readiness check - never exposes secrets or internals.
+  // Cloudflare Access authentication (see AUTHENTICATION.md). Validates its
+  // configuration eagerly so a misconfigured deployment fails at startup.
+  const auth = createAuth(process.env);
+  console.log(`[auth] authentication mode: ${auth.mode}`);
+
+  // ---- Public routes (registered BEFORE the auth middleware) --------------
+  // /api/health: hit by the Docker/Compose healthchecks from inside the
+  // network, where no Cloudflare Access JWT exists. Returns a static
+  // liveness payload only - never secrets or internals.
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok" });
   });
+
+  // /api/auth/me: lets the frontend show whether (and as whom) the user is
+  // authenticated. Only reports auth state - never tokens, PATs or config.
+  app.get("/api/auth/me", (req, res) => {
+    void auth.meHandler(req, res);
+  });
+
+  // Every other /api route requires a verified Cloudflare Access identity
+  // (or passes through when AUTH_MODE=disabled - the pre-existing LAN mode).
+  app.use("/api", auth.middleware);
 
   // Non-secret Azure DevOps connection defaults for the "Connect to Azure
   // DevOps" dialog. Deliberately never includes the PAT itself - only a

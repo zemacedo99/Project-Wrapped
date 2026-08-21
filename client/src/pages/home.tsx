@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Upload, FileJson, Database, GitBranch, Sparkles, ArrowRight, CheckCircle, X, Loader2, Cloud } from "lucide-react";
 import { SiGithub } from "react-icons/si";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AuthStatus } from "@/components/auth-status";
 
 type DataSource = "json" | "sample" | "azure" | "github" | null;
 
@@ -274,7 +275,11 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-accent/10 pointer-events-none" />
-      
+
+      <div className="absolute top-4 right-4 z-20">
+        <AuthStatus />
+      </div>
+
       <div className="relative z-10 container mx-auto px-4 py-16 max-w-4xl">
         <div className="text-center mb-12 space-y-4">
           <div className="flex items-center justify-center gap-2 mb-4">

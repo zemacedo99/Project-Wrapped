@@ -37,16 +37,18 @@ Connects to Azure DevOps (cloud or on-premises) and fetches:
 - **Database**: PostgreSQL with Drizzle ORM
 - **API**: Azure DevOps REST API
 
-## ⚠️ Security note: no authentication
+## ⚠️ Security note: authentication is off by default
 
-Project-Wrapped currently has **no login / authentication** on any route.
-Anyone who can reach the app's URL can view, create and upload wrapped
+By default (`AUTH_MODE=disabled`) Project-Wrapped has **no login** on any
+route: anyone who can reach the app's URL can view, create and upload wrapped
 projects. This is fine for local use or a trusted LAN, but:
 
-> **Do not expose this app directly to the internet without adding your own
-> access control** (e.g. a reverse proxy with HTTP basic auth / OAuth, or a
-> private tunnel/VPN restricted to people you trust). See
-> [Internet / production deployment](#internet--production-deployment) below.
+> **Do not expose this app to the internet without authentication.** The
+> supported way is **Cloudflare Zero Trust / Cloudflare Access with email
+> one-time PIN codes** (`AUTH_MODE=cloudflare-access`): Cloudflare handles
+> the email + code login at the edge and the backend verifies the signed
+> Cloudflare Access JWT on every API request, rejecting anything else with
+> `401`. Setup guide: [AUTHENTICATION.md](AUTHENTICATION.md).
 
 ## Prerequisites
 
@@ -187,6 +189,10 @@ scripts create it for you with secure generated credentials.
 | `ADVERTISED_HOST` | Optional | auto-detected | IP/hostname other devices use to reach this deployment - only affects printed URLs/logging, never how anything binds |
 | `AZURE_DEVOPS_BASE_URL` / `AZURE_DEVOPS_ORGANIZATION` / `AZURE_DEVOPS_PROJECT` | Optional | — | Non-secret defaults prefilled into the "Connect to Azure DevOps" dialog. Users can still edit/override every field |
 | `AZURE_DEVOPS_PAT` | Optional | — | Server-side only; never sent to the browser (only a `hasConfiguredPat` boolean is). Used when a user leaves the PAT field blank. **Shared by everyone using this deployment** - see [Azure DevOps connection defaults](#azure-devops-connection-defaults) |
+| `AUTH_MODE` | Authentication | `disabled` | `disabled` (no login, LAN-only usage), `cloudflare-access` (Cloudflare Access JWT verification on all sensitive API routes) or `dev-bypass` (local dev only). See [AUTHENTICATION.md](AUTHENTICATION.md) |
+| `CF_ACCESS_TEAM_DOMAIN` | Authentication | — | With `cloudflare-access`: your Zero Trust team domain (e.g. `myteam.cloudflareaccess.com`); determines the JWT issuer and JWKS URL. Required in that mode |
+| `CF_ACCESS_AUD` | Authentication | — | With `cloudflare-access`: the Access application's Audience (AUD) tag. Required in that mode |
+| `DEV_AUTH_EMAIL` | Authentication | — | With `dev-bypass` only: email injected as the authenticated user for local development. Refused when `NODE_ENV=production` |
 | `NODE_ENV` | Development-only | `development` | Set automatically by the setup scripts / Docker image; you shouldn't need to set it yourself |
 | `SESSION_SECRET` | Development-only | auto-generated | Reserved for future session/auth support (not currently read by the app) |
 | *(none currently)* | Production | — | No further app-specific production variables beyond the above; a public-domain/public-CA reverse proxy config lives in `deploy/`, not in `.env` |
@@ -367,14 +373,18 @@ LAN or internet.
 > or runs in Docker.** Beyond the app itself, exposing anything to the public
 > internet requires you to separately handle:
 >
-> - **Authentication / access control** - this app has none (see the security
->   note above). Put it behind a reverse proxy with HTTP basic auth, OAuth,
->   or a private tunnel/VPN limited to people you trust.
+> - **Authentication / access control** - enable the built-in Cloudflare
+>   Access support (`AUTH_MODE=cloudflare-access`): users authenticate with
+>   their email + a one-time PIN at the Cloudflare edge, and the backend
+>   verifies the Cloudflare Access JWT on every API request. Full setup guide:
+>   [AUTHENTICATION.md](AUTHENTICATION.md). (Alternatives: a reverse proxy
+>   with HTTP basic auth, or a private tunnel/VPN limited to people you trust.)
 > - **A server or computer that stays online** (a VPS, home server, NAS, etc.).
 > - **Public DNS pointing at it, or a secure tunnel** - forwarding a port
 >   directly on a home/office router exposes that router to the internet.
 >   A tunnel such as [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
->   or [Tailscale](https://tailscale.com/) avoids opening inbound firewall
+>   (pairs naturally with Cloudflare Access above) or
+>   [Tailscale](https://tailscale.com/) avoids opening inbound firewall
 >   ports at all and is generally safer for home/office setups - these are
 >   optional, separate tools and are **not** part of the default local setup.
 > - **Router/firewall configuration**, if you do forward a port.
@@ -509,7 +519,8 @@ Project-Wrapped/
 │       └── hooks/          # Custom React hooks
 ├── server/                 # Express backend
 │   ├── services/
-│   │   └── azure-devops.ts # Azure DevOps API integration
+│   │   ├── azure-devops.ts # Azure DevOps API integration
+│   │   └── cloudflare-access.ts # Cloudflare Access JWT verification (see AUTHENTICATION.md)
 │   └── routes.ts           # API routes
 ├── shared/                 # Shared types/schemas
 │   └── schema.ts           # Database schema & types

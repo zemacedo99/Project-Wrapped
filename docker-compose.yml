@@ -62,6 +62,13 @@ services:
       AZURE_DEVOPS_ORGANIZATION: ${AZURE_DEVOPS_ORGANIZATION:-}
       AZURE_DEVOPS_PROJECT: ${AZURE_DEVOPS_PROJECT:-}
       AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
+      # Cloudflare Access authentication (see AUTHENTICATION.md). Defaults to
+      # disabled (the pre-existing no-auth LAN behavior). DEV_AUTH_EMAIL is
+      # deliberately NOT passed through: dev-bypass is a local-development
+      # mode and refuses to run in production anyway.
+      AUTH_MODE: ${AUTH_MODE:-disabled}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
       # Internal service-to-service connection (Compose DNS name "db"),
       # independent of the DATABASE_URL a host-run dev server would use.
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-project_wrapped}
