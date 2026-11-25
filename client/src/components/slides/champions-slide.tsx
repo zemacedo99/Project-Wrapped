@@ -3,6 +3,7 @@ import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useAnimatedCounter, formatNumber } from "@/hooks/use-animated-counter";
 import type { Contributor } from "@shared/schema";
 import { Card } from "@/components/ui/card";
+import { findChampion } from "@/lib/poster-prompt";
 import { Trophy, Crown, MessageCircle, GitPullRequest, Bug, Zap, ShieldCheck } from "lucide-react";
 
 interface ChampionsSlideProps {
@@ -96,17 +97,6 @@ function ChampionCard({
       </div>
     </Card>
   );
-}
-
-function findChampion(
-  contributors: Contributor[],
-  key: keyof Contributor
-): Contributor | undefined {
-  return contributors.reduce((prev, current) => {
-    const prevValue = (prev[key] as number) || 0;
-    const currentValue = (current[key] as number) || 0;
-    return currentValue > prevValue ? current : prev;
-  }, contributors[0]);
 }
 
 export function ChampionsSlide({ contributors }: ChampionsSlideProps) {

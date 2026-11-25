@@ -13,6 +13,8 @@ import { HighlightsSlide } from "@/components/slides/highlights-slide";
 import { OutroSlide } from "@/components/slides/outro-slide";
 import { NavigationDots, useActiveSection, scrollToSection } from "@/components/navigation-dots";
 import { WrappedSettings } from "@/components/wrapped-settings";
+import { PosterPromptDialog } from "@/components/poster-prompt-dialog";
+import { buildPosterPrompt } from "@/lib/poster-prompt";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Home, Share2, Download, Image, FileText, Loader2, Settings } from "lucide-react";
@@ -85,6 +87,7 @@ export default function ProjectWrapped() {
   const [config, setConfig] = useState<WrappedConfig>(DEFAULT_CONFIG);
   const [revealAll, setRevealAll] = useState(false);
   const [isSnapshotting, setIsSnapshotting] = useState(false);
+  const [showPosterPrompt, setShowPosterPrompt] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const { data, isLoading, error } = useQuery<ProjectWrappedData>({
@@ -236,12 +239,25 @@ export default function ProjectWrapped() {
         testid: "slide-outro",
         name: "Outro",
         include: true,
-        node: <OutroSlide data={data} onDownloadSnapshot={handleDownloadSnapshot} isSnapshotting={isSnapshotting} />,
+        node: (
+          <OutroSlide
+            data={data}
+            onDownloadSnapshot={handleDownloadSnapshot}
+            isSnapshotting={isSnapshotting}
+            onCreatePosterPrompt={() => setShowPosterPrompt(true)}
+          />
+        ),
       },
     ];
 
     return all.filter((s) => s.include).map(({ testid, name, node }) => ({ testid, name, node }));
   }, [data, derived, isSnapshotting]);
+
+  // Uses the contributors currently shown, so hidden people never end up on the poster.
+  const posterPrompt = useMemo(
+    () => (data && derived ? buildPosterPrompt(data, derived.contributors) : null),
+    [data, derived]
+  );
 
   const sectionIds = visibleSlides.map((s) => s.testid);
   const sectionNames = visibleSlides.map((s) => s.name);
@@ -353,6 +369,8 @@ export default function ProjectWrapped() {
         config={config}
         onConfigChange={updateConfig}
       />
+
+      <PosterPromptDialog open={showPosterPrompt} onOpenChange={setShowPosterPrompt} prompt={posterPrompt} />
 
       <Dialog open={showExportDialog} onOpenChange={setShowExportDialog}>
         <DialogContent className="sm:max-w-md">

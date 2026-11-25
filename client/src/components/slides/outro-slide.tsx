@@ -16,6 +16,7 @@ import {
   Sparkles,
   PartyPopper,
   FileDown,
+  Clapperboard,
   Linkedin,
   Twitter,
   Slack,
@@ -30,6 +31,8 @@ interface OutroSlideProps {
   /** Saves a static HTML copy of the recap. Omitted: the option is hidden. */
   onDownloadSnapshot?: () => void;
   isSnapshotting?: boolean;
+  /** Opens the movie-poster image prompt. Omitted: the option is hidden. */
+  onCreatePosterPrompt?: () => void;
 }
 
 // Ways to share that aren't built yet: listed so people can see what's coming.
@@ -41,7 +44,7 @@ const COMING_SOON: Array<{ label: string; icon: LucideIcon }> = [
   { label: "Email", icon: Mail },
 ];
 
-export function OutroSlide({ data, onDownloadSnapshot, isSnapshotting = false }: OutroSlideProps) {
+export function OutroSlide({ data, onDownloadSnapshot, isSnapshotting = false, onCreatePosterPrompt }: OutroSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.3 });
 
   return (
@@ -138,9 +141,24 @@ export function OutroSlide({ data, onDownloadSnapshot, isSnapshotting = false }:
                       </div>
                     </div>
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
                 </>
               )}
+              {onCreatePosterPrompt && (
+                <DropdownMenuItem
+                  onSelect={onCreatePosterPrompt}
+                  className="items-start py-2"
+                  data-testid="menu-share-poster"
+                >
+                  <Clapperboard className="mt-0.5" />
+                  <div>
+                    <div className="font-medium">Create movie poster prompt</div>
+                    <div className="text-xs text-muted-foreground">
+                      An image prompt starring the Hall of Fame champions, for ChatGPT or similar.
+                    </div>
+                  </div>
+                </DropdownMenuItem>
+              )}
+              {(onDownloadSnapshot || onCreatePosterPrompt) && <DropdownMenuSeparator />}
               <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
                 Share to
               </DropdownMenuLabel>
