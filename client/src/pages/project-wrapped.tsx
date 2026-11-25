@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment, type ReactNode } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, Link } from "wouter";
 import type { ProjectWrappedData, WrappedConfig } from "@shared/schema";
@@ -26,6 +26,12 @@ import {
   serializeConfig,
 } from "@/lib/wrapped-config";
 import html2canvas from "html2canvas";
+import { RevealAllContext } from "@/hooks/use-intersection-observer";
+import { SNAPSHOT_EXCLUDE_ATTR, captureSnapshotHtml, downloadHtml, snapshotFileName } from "@/lib/html-snapshot";
+
+// Longest slide transition (700ms + delays) and number counters (2s + up to ~1s delay).
+const SNAPSHOT_SETTLE_MS = 3200;
+const excludeFromSnapshot = { [SNAPSHOT_EXCLUDE_ATTR]: "" };
 
 function LoadingState() {
   return (
@@ -77,6 +83,9 @@ export default function ProjectWrapped() {
   const [isExporting, setIsExporting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [config, setConfig] = useState<WrappedConfig>(DEFAULT_CONFIG);
+  const [revealAll, setRevealAll] = useState(false);
+  const [isSnapshotting, setIsSnapshotting] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const { data, isLoading, error } = useQuery<ProjectWrappedData>({
     queryKey: ["/api/wrapped", wrappedId],
@@ -118,6 +127,33 @@ export default function ProjectWrapped() {
       // localStorage may be unavailable (private mode); config still applies in-memory.
     }
   };
+
+  // Reveal every slide, let the transitions and counters finish, then save the
+  // rendered recap as one static HTML file. Uses the settings currently applied.
+  async function handleDownloadSnapshot() {
+    if (!data || isSnapshotting) return;
+    setIsSnapshotting(true);
+    setRevealAll(true);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_SETTLE_MS));
+      if (!rootRef.current) throw new Error("The recap isn't on screen");
+      const takenAt = new Date();
+      const html = await captureSnapshotHtml(rootRef.current, data.projectName, takenAt);
+      downloadHtml(html, snapshotFileName(data.projectName, takenAt));
+      toast({
+        title: "Snapshot downloaded",
+        description: "A static HTML copy with today's numbers. Anyone can open it; it won't update.",
+      });
+    } catch (err) {
+      toast({
+        title: "Snapshot failed",
+        description: err instanceof Error ? err.message : "Could not create the HTML snapshot",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSnapshotting(false);
+    }
+  }
 
   const derived = useMemo(() => (data ? applyConfig(data, config) : null), [data, config]);
 
@@ -196,11 +232,16 @@ export default function ProjectWrapped() {
         include: !hidden.has("highlights") && showHighlights,
         node: <HighlightsSlide highlights={data.highlights} funFacts={data.funFacts} showStoryPoints={derived.showStoryPoints} />,
       },
-      { testid: "slide-outro", name: "Outro", include: true, node: <OutroSlide data={data} /> },
+      {
+        testid: "slide-outro",
+        name: "Outro",
+        include: true,
+        node: <OutroSlide data={data} onDownloadSnapshot={handleDownloadSnapshot} isSnapshotting={isSnapshotting} />,
+      },
     ];
 
     return all.filter((s) => s.include).map(({ testid, name, node }) => ({ testid, name, node }));
-  }, [data, derived]);
+  }, [data, derived, isSnapshotting]);
 
   const sectionIds = visibleSlides.map((s) => s.testid);
   const sectionNames = visibleSlides.map((s) => s.name);
@@ -286,8 +327,9 @@ export default function ProjectWrapped() {
   if (!data) return <ErrorState error={new Error("No data available")} />;
 
   return (
-    <div className="min-h-screen bg-background text-foreground scroll-smooth" data-testid="project-wrapped">
-      <div className="fixed top-4 left-4 z-50 flex items-center gap-2">
+    <RevealAllContext.Provider value={revealAll}>
+    <div ref={rootRef} className="min-h-screen bg-background text-foreground scroll-smooth" data-testid="project-wrapped">
+      <div className="fixed top-4 left-4 z-50 flex items-center gap-2" {...excludeFromSnapshot}>
         <Link href="/">
           <Button size="icon" variant="outline" data-testid="button-home">
             <Home className="w-4 h-4" />
@@ -365,15 +407,18 @@ export default function ProjectWrapped() {
         </DialogContent>
       </Dialog>
 
-      <NavigationDots
-        sections={sectionNames}
-        activeSection={activeSection}
-        onDotClick={(index) => scrollToSection(index, sectionIds)}
-      />
+      <div {...excludeFromSnapshot}>
+        <NavigationDots
+          sections={sectionNames}
+          activeSection={activeSection}
+          onDotClick={(index) => scrollToSection(index, sectionIds)}
+        />
+      </div>
 
       {visibleSlides.map((s) => (
         <Fragment key={s.testid}>{s.node}</Fragment>
       ))}
     </div>
+    </RevealAllContext.Provider>
   );
 }

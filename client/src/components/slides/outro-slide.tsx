@@ -1,13 +1,47 @@
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import type { ProjectWrappedData } from "@shared/schema";
 import { Button } from "@/components/ui/button";
-import { Heart, Share2, Sparkles, PartyPopper } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { SNAPSHOT_EXCLUDE_ATTR } from "@/lib/html-snapshot";
+import {
+  Heart,
+  Share2,
+  Sparkles,
+  PartyPopper,
+  FileDown,
+  Linkedin,
+  Twitter,
+  Slack,
+  MessagesSquare,
+  Mail,
+  Loader2,
+  type LucideIcon,
+} from "lucide-react";
 
 interface OutroSlideProps {
   data: ProjectWrappedData;
+  /** Saves a static HTML copy of the recap. Omitted: the option is hidden. */
+  onDownloadSnapshot?: () => void;
+  isSnapshotting?: boolean;
 }
 
-export function OutroSlide({ data }: OutroSlideProps) {
+// Ways to share that aren't built yet: listed so people can see what's coming.
+const COMING_SOON: Array<{ label: string; icon: LucideIcon }> = [
+  { label: "LinkedIn", icon: Linkedin },
+  { label: "X (Twitter)", icon: Twitter },
+  { label: "Slack", icon: Slack },
+  { label: "Microsoft Teams", icon: MessagesSquare },
+  { label: "Email", icon: Mail },
+];
+
+export function OutroSlide({ data, onDownloadSnapshot, isSnapshotting = false }: OutroSlideProps) {
   const [ref, isVisible] = useIntersectionObserver<HTMLElement>({ threshold: 0.3 });
 
   return (
@@ -71,14 +105,56 @@ export function OutroSlide({ data }: OutroSlideProps) {
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
           }`}
         >
-          <Button
-            size="lg"
-            className="bg-gradient-to-r from-primary to-accent text-white border-0 px-8"
-            data-testid="button-share"
-          >
-            <Share2 className="w-5 h-5 mr-2" />
-            Share this (coming soon)
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="lg"
+                className="bg-gradient-to-r from-primary to-accent text-white border-0 px-8"
+                data-testid="button-share"
+                {...{ [SNAPSHOT_EXCLUDE_ATTR]: "" }}
+              >
+                {isSnapshotting ? (
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                ) : (
+                  <Share2 className="w-5 h-5 mr-2" />
+                )}
+                {isSnapshotting ? "Preparing snapshot…" : "Share this"}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="center" className="w-72" data-testid="menu-share">
+              {onDownloadSnapshot && (
+                <>
+                  <DropdownMenuItem
+                    onSelect={onDownloadSnapshot}
+                    disabled={isSnapshotting}
+                    className="items-start py-2"
+                    data-testid="menu-share-snapshot"
+                  >
+                    <FileDown className="mt-0.5" />
+                    <div>
+                      <div className="font-medium">Download HTML snapshot</div>
+                      <div className="text-xs text-muted-foreground">
+                        One file with the current numbers. Opens anywhere, offline; it won't update.
+                      </div>
+                    </div>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                Share to
+              </DropdownMenuLabel>
+              {COMING_SOON.map(({ label, icon: Icon }) => (
+                <DropdownMenuItem key={label} disabled data-testid={`menu-share-${label.toLowerCase().replace(/[^a-z]+/g, "-")}`}>
+                  <Icon />
+                  <span className="flex-1">{label}</span>
+                  <span className="text-[10px] uppercase tracking-wide rounded-full border border-white/15 px-2 py-0.5">
+                    Coming soon
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <div

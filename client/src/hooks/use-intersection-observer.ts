@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState, RefObject } from "react";
+import { createContext, useContext, useEffect, useRef, useState, RefObject } from "react";
+
+// When true, every slide renders as if it had been scrolled into view, so the
+// whole recap is in its final state at once (used to take an HTML snapshot).
+export const RevealAllContext = createContext(false);
 
 interface UseIntersectionObserverOptions {
   threshold?: number;
@@ -38,5 +42,6 @@ export function useIntersectionObserver<T extends HTMLElement = HTMLDivElement>(
     };
   }, [threshold, rootMargin, triggerOnce]);
 
-  return [ref, isIntersecting];
+  const revealAll = useContext(RevealAllContext);
+  return [ref, isIntersecting || revealAll];
 }
