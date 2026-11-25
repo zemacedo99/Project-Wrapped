@@ -400,6 +400,21 @@ export function summarizeCompleteness(c: ImportCompleteness): CompletenessSummar
 // all repositories; otherwise keep only the repositories whose name was selected.
 // This is what makes repository filtering accurate: the returned set is the only
 // one whose commits/PRs are fetched, so every repo-derived number reflects it.
+// Azure DevOps lists disabled repositories, but every commit/PR call on one
+// returns 404 (TF401019). They hold no readable data, so leave them out instead
+// of counting them as failed fetches that mark the recap partial.
+export function splitDisabledRepositories<T extends { name: string; isDisabled?: boolean }>(
+  all: T[]
+): { active: T[]; disabled: string[] } {
+  const active: T[] = [];
+  const disabled: string[] = [];
+  for (const r of all) {
+    if (r.isDisabled === true) disabled.push(r.name);
+    else active.push(r);
+  }
+  return { active, disabled };
+}
+
 export function selectRepositories<T extends { name: string }>(all: T[], selected: string[]): T[] {
   const wanted = selected.filter(n => n && n.trim());
   if (wanted.length === 0) return all;
@@ -422,10 +437,13 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
   const tracker = newCompleteness();
 
   // Fetch repositories (for repo-level stats) and iterations (for real sprints).
-  const [allRepositories, iterations] = await Promise.all([
+  const [{ active: allRepositories, disabled: disabledRepositories }, iterations] = await Promise.all([
     fetchRepositories(config, tracker),
     fetchIterations(config),
   ]);
+  if (disabledRepositories.length > 0) {
+    console.log(`[Azure DevOps] Skipping ${disabledRepositories.length} disabled repositories: ${disabledRepositories.join(", ")}`);
+  }
 
   // Apply the import-time repository selection: only fetch commits/PRs for the
   // selected repositories so every repo-derived number is genuinely accurate.
@@ -608,6 +626,11 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
             `This recap includes only ${repositories.length} of ${allRepositories.length} repositories, selected at import — commit, pull request and repository metrics reflect only those. Work items are project-scoped in Azure DevOps and are not affected by repository selection.`,
           ]
         : []),
+      ...(disabledRepositories.length > 0
+        ? [
+            `${disabledRepositories.length} disabled Azure DevOps ${disabledRepositories.length === 1 ? "repository was" : "repositories were"} skipped because their commits and pull requests cannot be read: ${disabledRepositories.join(", ")}.`,
+          ]
+        : []),
       "PR discussion comments and lines-added/deleted are not collected — scanning every PR thread at project scale is too slow, so those metrics are intentionally omitted rather than shown partially.",
       "Contributors are unified into one person per Azure DevOps account by matching email / unique name, then exact display name. Commits from linked git identities are summed into that person; git identities with no Azure match are shown separately and can be linked manually in Settings → Contributors.",
       "Bug 'resolved by developer' (Bug Slayer) and 'validated by tester' (Validation Hero) are read from each bug's work item history and credited to the person who performed that state transition — not the current assignee. Bugs whose history could not be read carry no such credit (see completeness warnings).",
@@ -645,19 +668,18 @@ export async function fetchAzureDevOpsData(config: AzureDevOpsConfig): Promise<P
 async function fetchRepositories(
   config: AzureDevOpsConfig,
   tracker?: ImportCompleteness
-): Promise<Array<{ id: string; name: string }>> {
+): Promise<{ active: Array<{ id: string; name: string }>; disabled: string[] }> {
   try {
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-    const repos = reposResponse.value || [];
-    if (tracker) tracker.repositoriesFound = repos.length;
-    return repos;
+    const reposResponse = await fetchAzureDevOps<{
+      value: Array<{ id: string; name: string; isDisabled?: boolean }>;
+    }>(config, "/git/repositories");
+    const split = splitDisabledRepositories(reposResponse.value || []);
+    if (tracker) tracker.repositoriesFound = split.active.length;
+    return split;
   } catch (error) {
     console.warn("[Azure DevOps] Failed to fetch repositories:", error);
     if (tracker) tracker.repositoryListFailed = true;
-    return [];
+    return { active: [], disabled: [] };
   }
 }
 
@@ -1780,15 +1802,16 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
     console.log(`[Azure DevOps] Base URL: ${config.baseUrl || 'Azure DevOps cloud'}`);
     
     // Test by fetching repositories (more reliable than project endpoint for on-premises)
-    const reposResponse = await fetchAzureDevOps<{ value: Array<{ id: string; name: string }> }>(
-      config,
-      "/git/repositories"
-    );
-    
-    console.log(`[Azure DevOps] Found ${reposResponse.value.length} repositories`);
-    
+    const reposResponse = await fetchAzureDevOps<{
+      value: Array<{ id: string; name: string; isDisabled?: boolean }>;
+    }>(config, "/git/repositories");
+    // Disabled repositories can't be read, so don't offer them for selection.
+    const { active: repos, disabled } = splitDisabledRepositories(reposResponse.value || []);
+
+    console.log(`[Azure DevOps] Found ${repos.length} repositories (${disabled.length} disabled, skipped)`);
+
     // If we have repos, connection is successful
-    if (reposResponse.value.length === 0) {
+    if (repos.length === 0) {
       return {
         success: true,
         message: `Connected to ${config.project}, but no repositories found`,
@@ -1805,8 +1828,9 @@ export async function testAzureDevOpsConnection(config: AzureDevOpsConfig): Prom
       message: `Successfully connected to ${config.project}`,
       details: {
         projectName: config.project,
-        repositoryCount: reposResponse.value.length,
-        repositories: reposResponse.value.map(r => r.name),
+        repositoryCount: repos.length,
+        repositories: repos.map(r => r.name),
+        disabledRepositories: disabled,
       }
     };
   } catch (error) {

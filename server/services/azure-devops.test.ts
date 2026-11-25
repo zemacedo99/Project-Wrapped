@@ -16,6 +16,7 @@ import {
   newCompleteness,
   summarizeCompleteness,
   selectRepositories,
+  splitDisabledRepositories,
   canonicalizeContributors,
   countIterationsInRange,
   type ImportCompleteness,
@@ -630,6 +631,23 @@ describe("selectRepositories", () => {
 
   test("unknown names simply match nothing", () => {
     assert.deepEqual(selectRepositories(repos, ["ghost"]), []);
+  });
+});
+
+describe("splitDisabledRepositories", () => {
+  test("drops disabled repositories and names them", () => {
+    const { active, disabled } = splitDisabledRepositories([
+      { id: "1", name: "web", isDisabled: false },
+      { id: "2", name: "legacy", isDisabled: true },
+      { id: "3", name: "api" }, // older servers omit the flag: treat as active
+    ]);
+    assert.deepEqual(active.map(r => r.name), ["web", "api"]);
+    assert.deepEqual(disabled, ["legacy"]);
+  });
+
+  test("no disabled repositories leaves the list unchanged", () => {
+    const repos = [{ id: "1", name: "web" }];
+    assert.deepEqual(splitDisabledRepositories(repos), { active: repos, disabled: [] });
   });
 });
 
